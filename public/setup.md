@@ -1,6 +1,6 @@
 # How to use it
 
-Cursor does not expose Composer through a standard API. This proxy accepts familiar OpenAI-style requests and transforms the formats into something Cursor can use.
+Cursor does not expose a standard inference API. This proxy accepts familiar OpenAI-style requests and transforms the formats into something Cursor can use.
 
 Use the OpenAI SDK, Vercel AI SDK, or any client that can set a custom base URL. Authenticate every request with your Cursor API key as a Bearer token.
 

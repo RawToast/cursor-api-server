@@ -621,7 +621,7 @@ code {
 /* ---- footer ---- */
 .site-footer {
   display: flex;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   margin-top: 30px;
@@ -630,8 +630,7 @@ code {
   color: var(--text-faint);
   font-size: 0.72rem;
   line-height: 1.2;
-  overflow-x: auto;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .footer-dot {
@@ -681,9 +680,7 @@ code {
   color: var(--text-dim);
   font-size: 0.72rem;
   line-height: 1.2;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  max-width: 270px;
 }
 
 .sa-bar-form {
@@ -1729,6 +1726,10 @@ code {
     width: calc(100% - 28px);
   }
 
+  .top-link[href="/chat"] {
+    display: none;
+  }
+
   .top-link > span:not(.star-pill) {
     display: none;
   }
@@ -1740,6 +1741,31 @@ code {
 
   #hero-title {
     font-size: 3rem;
+  }
+
+  .hero-lede {
+    max-width: 330px;
+  }
+
+  .hero-actions {
+    flex-wrap: nowrap;
+    gap: 8px;
+  }
+
+  .hero-actions .btn {
+    flex: 1 1 0;
+    min-width: 0;
+    min-height: 44px;
+    padding: 0 10px;
+    gap: 6px;
+    font-size: clamp(0.72rem, 3.3vw, 0.86rem);
+    white-space: nowrap;
+  }
+
+  .hero-actions .btn svg {
+    width: 16px;
+    height: 16px;
+    flex: none;
   }
 
   .docs-head h2 {
@@ -1772,22 +1798,47 @@ code {
 
   .sa-bar-inner {
     width: calc(100% - 20px);
+    align-items: center;
+    gap: 6px;
+    overflow-x: hidden;
   }
 
   .sa-bar-pitch {
-    flex: 0 0 auto;
+    flex: 0 1 78px;
+    min-width: 78px;
+    gap: 5px;
   }
 
   .sa-bar-pitch p {
-    display: none;
+    display: block;
+    max-width: 58px;
+    font-size: 0.61rem;
+    line-height: 1.1;
+  }
+
+  .sa-bar-form {
+    flex: 1 1 auto;
+    min-width: 0;
+    gap: 4px;
   }
 
   .sa-bar-form input {
-    width: 92px;
+    flex: 1 1 52px;
+    width: clamp(52px, 16vw, 76px);
     min-width: 0;
+    padding: 0 6px;
   }
 
   .sa-bar-submit {
     justify-content: center;
+    flex: 0 0 auto;
+    gap: 4px;
+    padding: 0 5px;
+    font-size: 0.62rem;
+  }
+
+  .sa-bar-submit svg {
+    width: 12px;
+    height: 12px;
   }
 }
