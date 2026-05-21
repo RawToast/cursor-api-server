@@ -3,10 +3,10 @@ import { handleRequest } from "./index";
 import { FakeD1, fakeCtx } from "./test-helpers";
 import type { Deps, Env } from "./types";
 
-function makeEnv(db: FakeD1): Env {
+function makeEnv(db: FakeD1, assetsFetch: Fetcher["fetch"] = () => Promise.resolve(new Response("asset"))): Env {
   return {
     DB: db as unknown as D1Database,
-    ASSETS: { fetch: () => Promise.resolve(new Response("asset")) } as unknown as Fetcher,
+    ASSETS: { fetch: assetsFetch } as unknown as Fetcher,
     ENCRYPTION_KEY: "test-encryption-secret-with-enough-entropy",
     CURSOR_API_BASE: "https://api.cursor.test",
     CURSOR_BACKEND_BASE_URL: "https://cursor-backend.test"
@@ -14,6 +14,32 @@ function makeEnv(db: FakeD1): Env {
 }
 
 describe("Worker", () => {
+  it("serves current stable Vite assets for stale hashed asset URLs", async () => {
+    const db = new FakeD1();
+    const requested: string[] = [];
+    const env = makeEnv(db, (input) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      requested.push(url.pathname);
+      if (url.pathname === "/assets/index.css") {
+        return Promise.resolve(new Response("body { color: red; }", { headers: { "content-type": "text/css" } }));
+      }
+      return Promise.resolve(new Response(null, { status: 404 }));
+    });
+    const { deps } = fakeDeps();
+
+    const response = await handleRequest(
+      new Request("https://composer.test/assets/index-OLDHASH.css"),
+      env,
+      fakeCtx(),
+      deps
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/css");
+    await expect(response.text()).resolves.toContain("color: red");
+    expect(requested).toContain("/assets/index.css");
+  });
+
   it("signs up a Cursor API key and serves chat completions", async () => {
     const db = new FakeD1();
     const env = makeEnv(db);

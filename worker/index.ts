@@ -55,6 +55,12 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
       return await handleOpenAiRoute(request, env, ctx, deps, route);
     }
 
+    const staleAssetFallback = staleViteAssetFallbackPath(url.pathname);
+    if (staleAssetFallback) {
+      const response = await fetchAsset(env, request, staleAssetFallback);
+      if (response.status !== 404) return withCors(response);
+    }
+
     // Client-side routes (e.g. `/chat`) have no matching asset; serve the SPA
     // shell so the front-end router can take over.
     if (isDocumentRequest(request, url) && url.pathname !== "/") {
@@ -68,6 +74,27 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
   } catch (error) {
     return errorResponse(error);
   }
+}
+
+function staleViteAssetFallbackPath(pathname: string): string | null {
+  if (/^\/assets\/index-[A-Za-z0-9_-]+\.css$/.test(pathname)) return "/assets/index.css";
+  if (/^\/assets\/index-[A-Za-z0-9_-]+\.js$/.test(pathname)) return "/assets/index.js";
+  if (/^\/assets\/index-[A-Za-z0-9_-]+\.js\.map$/.test(pathname)) return "/assets/index.js.map";
+  if (/^\/assets\/chat-[A-Za-z0-9_-]+\.js$/.test(pathname)) return "/assets/chat.js";
+  if (/^\/assets\/chat-[A-Za-z0-9_-]+\.js\.map$/.test(pathname)) return "/assets/chat.js.map";
+  return null;
+}
+
+function fetchAsset(env: Env, request: Request, pathname: string): Promise<Response> {
+  const url = new URL(request.url);
+  url.pathname = pathname;
+  url.search = "";
+  return env.ASSETS.fetch(
+    new Request(url.toString(), {
+      method: "GET",
+      headers: request.headers
+    })
+  );
 }
 
 const EMAIL_PATTERN = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;

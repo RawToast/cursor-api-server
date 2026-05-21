@@ -54,6 +54,7 @@ const MAX_ATTACHMENTS = 4;
 const IMAGE_MAX_DIMENSION = 1024;
 const IMAGE_TARGET_BYTES = 900 * 1024;
 const IMAGE_OUTPUT_TYPE = "image/jpeg";
+const MOBILE_INSPECTOR_QUERY = "(max-width: 900px)";
 
 /* ============================================================ state */
 
@@ -69,7 +70,7 @@ function loadState(): PersistedState {
     activeId: null,
     model: "composer-2.5",
     mode: "chat",
-    inspectorOpen: true
+    inspectorOpen: defaultInspectorOpen()
   };
   try {
     const raw = localStorage.getItem(STATE_KEY);
@@ -80,11 +81,15 @@ function loadState(): PersistedState {
       activeId: typeof parsed.activeId === "string" ? parsed.activeId : null,
       model: typeof parsed.model === "string" ? parsed.model : "composer-2.5",
       mode: parsed.mode === "responses" ? "responses" : "chat",
-      inspectorOpen: parsed.inspectorOpen !== false
+      inspectorOpen: defaultInspectorOpen() && parsed.inspectorOpen !== false
     };
   } catch {
     return fallback;
   }
+}
+
+function defaultInspectorOpen(): boolean {
+  return !window.matchMedia(MOBILE_INSPECTOR_QUERY).matches;
 }
 
 function saveState(): void {
@@ -107,12 +112,15 @@ function activeSession(): Session | null {
 
 let busy = false;
 let pendingImages: ChatImage[] = [];
+let inspectorTouched = false;
+let responsiveInspectorBound = false;
 
 export function mountChat(root: HTMLElement): void {
   cleanStoredSessions();
   root.innerHTML = template();
   cacheRefs(root);
   bindEvents();
+  bindResponsiveInspector();
 
   const remembered = (() => {
     try {
@@ -127,6 +135,7 @@ export function mountChat(root: HTMLElement): void {
   renderTranscript();
   renderInspector();
   syncControls();
+  syncResponsiveInspector();
 
   if (!apiKey) openKeyModal();
   refs.composer.focus();
@@ -391,6 +400,7 @@ function bindEvents(): void {
   });
 
   document.getElementById("inspector-toggle")?.addEventListener("click", () => {
+    inspectorTouched = true;
     state.inspectorOpen = !state.inspectorOpen;
     refs.app.dataset.inspector = state.inspectorOpen ? "open" : "closed";
     saveState();
@@ -407,6 +417,19 @@ function bindEvents(): void {
     event.preventDefault();
     submitKey();
   });
+}
+
+function bindResponsiveInspector(): void {
+  if (responsiveInspectorBound) return;
+  responsiveInspectorBound = true;
+  window.matchMedia(MOBILE_INSPECTOR_QUERY).addEventListener("change", () => syncResponsiveInspector());
+}
+
+function syncResponsiveInspector(): void {
+  if (inspectorTouched || !window.matchMedia(MOBILE_INSPECTOR_QUERY).matches || !state.inspectorOpen) return;
+  state.inspectorOpen = false;
+  refs.app.dataset.inspector = "closed";
+  saveState();
 }
 
 /* ============================================================ rendering */
@@ -750,25 +773,21 @@ async function send(): Promise<void> {
 
   const mode = state.mode;
   let received = "";
+  const requestBody = buildRequestBody();
 
   try {
-    const response = await fetch(endpointFor(mode), {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(buildRequestBody())
-    });
-
-    if (!response.ok || !response.body) {
-      const payload = (await response.json().catch(() => ({}))) as { error?: { message?: string } };
-      throw new Error(payload.error?.message || `Request failed (${response.status}).`);
-    }
-
-    const stream = mode === "responses" ? readResponseDeltas(response.body) : readChatDeltas(response.body);
-    for await (const delta of stream) {
-      received += delta;
+    try {
+      const response = await sendRequest(mode, requestBody);
+      if (!response.body) throw new Error("Request failed before the stream started.");
+      const stream = mode === "responses" ? readResponseDeltas(response.body) : readChatDeltas(response.body);
+      for await (const delta of stream) {
+        received += delta;
+        bubble.innerHTML = renderAssistantContent(received);
+        refs.transcript.scrollTop = refs.transcript.scrollHeight;
+      }
+    } catch (error) {
+      if (received || !isStreamLoadFailure(error)) throw error;
+      received = await sendBufferedRetry(mode, requestBody);
       bubble.innerHTML = renderAssistantContent(received);
       refs.transcript.scrollTop = refs.transcript.scrollHeight;
     }
@@ -790,6 +809,56 @@ async function send(): Promise<void> {
     renderInspector();
     refs.composer.focus();
   }
+}
+
+async function sendRequest(mode: ApiMode, body: Record<string, unknown>): Promise<Response> {
+  const response = await fetch(endpointFor(mode), {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
+  if (!response.ok) throw await responseError(response);
+  return response;
+}
+
+async function sendBufferedRetry(mode: ApiMode, body: Record<string, unknown>): Promise<string> {
+  const response = await sendRequest(mode, { ...body, stream: false });
+  const payload = (await response.json()) as Record<string, unknown>;
+  const text = mode === "responses" ? bufferedResponseText(payload) : bufferedChatText(payload);
+  if (!text) throw new Error("The retry completed without text.");
+  return text;
+}
+
+async function responseError(response: Response): Promise<Error> {
+  const payload = (await response.json().catch(() => ({}))) as { error?: { message?: string } };
+  return new Error(payload.error?.message || `Request failed (${response.status}).`);
+}
+
+function isStreamLoadFailure(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return /load failed|networkerror|failed to fetch|network request failed/i.test(error.message);
+}
+
+function bufferedChatText(payload: Record<string, unknown>): string {
+  const choices = Array.isArray(payload.choices) ? payload.choices : [];
+  const first = choices[0] as { message?: { content?: unknown } } | undefined;
+  return typeof first?.message?.content === "string" ? first.message.content : "";
+}
+
+function bufferedResponseText(payload: Record<string, unknown>): string {
+  if (typeof payload.output_text === "string") return payload.output_text;
+  const output = Array.isArray(payload.output) ? payload.output : [];
+  const parts: string[] = [];
+  for (const item of output as Array<{ content?: unknown }>) {
+    const content = Array.isArray(item.content) ? item.content : [];
+    for (const part of content as Array<{ text?: unknown }>) {
+      if (typeof part.text === "string") parts.push(part.text);
+    }
+  }
+  return parts.join("");
 }
 
 function setBusy(value: boolean): void {

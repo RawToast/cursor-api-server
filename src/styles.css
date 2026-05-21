@@ -1677,12 +1677,24 @@ code {
   /* Inspector becomes an under-panel on narrow screens. */
   .chat-body {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(0, 1.6fr) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) minmax(180px, 38dvh);
+  }
+
+  .chat-app[data-inspector="closed"] .chat-body {
+    grid-template-rows: minmax(0, 1fr);
   }
 
   .chat-inspector {
     border-left: none;
     border-top: 1px solid var(--line);
+    max-height: 38dvh;
+  }
+
+  .chat-composer {
+    position: sticky;
+    bottom: 0;
+    z-index: 2;
+    background: var(--bg);
   }
 }
 
@@ -1724,6 +1736,46 @@ code {
 
   .shell {
     width: calc(100% - 28px);
+  }
+
+  .chat-topbar {
+    gap: 8px;
+    padding: 10px;
+    overflow-x: auto;
+  }
+
+  .chat-title {
+    display: none;
+  }
+
+  .chat-controls,
+  .control,
+  .mode-switch {
+    flex: none;
+  }
+
+  .chat-controls {
+    gap: 8px;
+  }
+
+  .select-wrap select {
+    width: min(42vw, 164px);
+  }
+
+  .chat-transcript {
+    padding: 22px 20px;
+  }
+
+  .chat-error {
+    margin: 0 20px;
+  }
+
+  .chat-composer {
+    padding: 12px 20px 14px;
+  }
+
+  .chat-inspector {
+    max-height: 34dvh;
   }
 
   .top-link[href="/chat"] {
