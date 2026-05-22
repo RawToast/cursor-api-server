@@ -86,6 +86,43 @@ print(response.output_text)
 
 :::
 
+## OpenCode
+
+OpenCode supports custom OpenAI-compatible providers through `@ai-sdk/openai-compatible`, so you can point it at this proxy and use your Cursor API key as the provider key.
+
+Add a custom provider to `~/.config/opencode/opencode.json`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "cursor/composer-2.5",
+  "provider": {
+    "cursor": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Cursor",
+      "options": {
+        "baseURL": "{{BASE_URL}}",
+        "apiKey": "{env:CURSOR_API_KEY}"
+      },
+      "models": {
+        "composer-2.5": {
+          "name": "Composer 2.5"
+        }
+      }
+    }
+  }
+}
+```
+
+Then start OpenCode with your Cursor API key in the environment:
+
+```bash
+export CURSOR_API_KEY="crsr_..."
+opencode
+```
+
+If you do not set `model`, run `/models` inside OpenCode and choose `cursor/composer-2.5`.
+
 ## cURL
 
 ```bash
