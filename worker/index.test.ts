@@ -88,6 +88,67 @@ describe("Worker", () => {
     });
   });
 
+  it("normalizes tool-call arguments through account-scoped Worker endpoints", async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { deps } = fakeDeps();
+
+    const signup = await handleRequest(
+      new Request("https://composer.test/api/signup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cursorApiKey: "cursor_key", name: "Ada", email: "ada@example.com" })
+      }),
+      env,
+      fakeCtx(),
+      deps
+    );
+    const signupBody = (await signup.json()) as { apiKey: string; endpoints: { chatCompletions: string } };
+
+    const response = await handleRequest(
+      new Request(signupBody.endpoints.chatCompletions, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${signupBody.apiKey}`
+        },
+        body: JSON.stringify({
+          model: "composer-2.5",
+          messages: [{ role: "user", content: "Schema transform" }],
+          tools: [
+            {
+              type: "function",
+              function: {
+                name: "glob",
+                parameters: {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: { pattern: { type: "string" } },
+                  required: ["pattern"]
+                }
+              }
+            }
+          ]
+        })
+      }),
+      env,
+      fakeCtx(),
+      deps
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      choices: [
+        {
+          message: {
+            tool_calls: [{ type: "function", function: { name: "glob", arguments: "{\"pattern\":\"*.ts\"}" } }]
+          },
+          finish_reason: "tool_calls"
+        }
+      ]
+    });
+  });
+
   it("serves bare /v1/chat/completions with a direct Cursor key and writes no request log", async () => {
     const db = new FakeD1();
     const env = makeEnv(db);
@@ -616,6 +677,33 @@ function fakeDeps(): {
             new ReadableStream<Uint8Array>({
               start(controller) {
                 controller.enqueue(connectFrame(cursorError("Too many computers.", "Too many computers used within the last 24 hours."), 2));
+                controller.close();
+              }
+            }),
+            { headers: { "Content-Type": "application/connect+proto" } }
+          );
+        }
+        if (requestText.includes("Schema transform")) {
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.enqueue(
+                  connectFrame(
+                    chatResponseText(
+                      [
+                        "Checking the workspace.\n",
+                        "<|tool_calls_begin|><|tool_call_begin|>\n",
+                        "Glob\n",
+                        "<|tool_sep|>targeting\n",
+                        "/Users/example/project/**\n",
+                        "<|tool_sep|>glob_pattern\n",
+                        "*.ts\n",
+                        "<|tool_call_end|><|tool_calls_end|>"
+                      ].join("")
+                    )
+                  )
+                );
+                controller.enqueue(connectFrame(new TextEncoder().encode("{}"), 2));
                 controller.close();
               }
             }),

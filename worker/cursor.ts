@@ -779,16 +779,36 @@ function parseJsonToolCallBody(value: string): CursorToolCall | null {
   if (!value.startsWith("{") || !value.endsWith("}")) return null;
   try {
     const parsed = JSON.parse(value) as unknown;
-    if (!isRecord(parsed) || typeof parsed.name !== "string" || !parsed.name.trim()) return null;
-    const rawArguments = parsed.arguments;
-    let args: Record<string, unknown> = {};
-    if (isRecord(rawArguments)) {
-      args = rawArguments;
-    } else if (typeof rawArguments === "string" && rawArguments.trim()) {
-      const decoded = JSON.parse(rawArguments) as unknown;
-      if (isRecord(decoded)) args = decoded;
-    }
-    return { name: parsed.name.trim(), arguments: args };
+    if (!isRecord(parsed)) return null;
+    const fn = isRecord(parsed.function) ? parsed.function : undefined;
+    const name = firstString(parsed.name, parsed.tool, parsed.tool_name, parsed.toolName, fn?.name);
+    if (!name) return null;
+    const rawArguments =
+      parsed.arguments ??
+      parsed.args ??
+      parsed.input ??
+      parsed.parameters ??
+      parsed.params ??
+      fn?.arguments;
+    return { name, arguments: recordFromToolArguments(rawArguments) ?? {} };
+  } catch {
+    return null;
+  }
+}
+
+function firstString(...values: unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return null;
+}
+
+function recordFromToolArguments(value: unknown): Record<string, unknown> | null {
+  if (isRecord(value)) return value;
+  if (typeof value !== "string" || !value.trim()) return null;
+  try {
+    const decoded = JSON.parse(value) as unknown;
+    return isRecord(decoded) ? decoded : null;
   } catch {
     return null;
   }

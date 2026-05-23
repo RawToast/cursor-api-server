@@ -246,6 +246,20 @@ describe("Cursor stream adapter", () => {
     ).toEqual([{ name: "read", arguments: { filePath: "README.md" } }]);
   });
 
+  it("parses alternate JSON tool-call body shapes", () => {
+    expect(
+      cursorTestExports.parseComposerToolCalls(
+        '<|tool_calls_begin|><|tool_call_begin|>{"tool_name":"write_file","args":{"target_file":"index.html","new_contents":"hi"}}<|tool_call_end|><|tool_calls_end|>'
+      )
+    ).toEqual([{ name: "write_file", arguments: { target_file: "index.html", new_contents: "hi" } }]);
+
+    expect(
+      cursorTestExports.parseComposerToolCalls(
+        '<|tool_calls_begin|><|tool_call_begin|>{"function":{"name":"bash","arguments":"{\\"cmd\\":\\"npm test\\"}"}}<|tool_call_end|><|tool_calls_end|>'
+      )
+    ).toEqual([{ name: "bash", arguments: { cmd: "npm test" } }]);
+  });
+
   it("does not emit leading whitespace before split tool-call markers", async () => {
     const response = new Response(
       new ReadableStream<Uint8Array>({

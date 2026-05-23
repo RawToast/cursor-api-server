@@ -790,7 +790,9 @@ function resolveToolSpec(emittedName: string, tools: OpenAiToolSpec[]): OpenAiTo
   if (exact) return exact;
   const normalized = normalizeToolName(emittedName);
   const match = tools.find((tool) => normalizeToolName(tool.name) === normalized);
-  return match;
+  if (match) return match;
+  const candidates = toolNameAliases(normalized);
+  return tools.find((tool) => candidates.includes(normalizeToolName(tool.name)));
 }
 
 function normalizeToolName(value: string): string {
@@ -798,44 +800,229 @@ function normalizeToolName(value: string): string {
 }
 
 function normalizeToolArguments(args: Record<string, unknown>, tool: OpenAiToolSpec | undefined): Record<string, unknown> {
-  const properties = toolParameterProperties(tool);
-  if (!properties.length) return args;
+  const schema = toolParameterSchema(tool);
+  const argsToNormalize = expandToolArguments(args);
+  if (!schema.properties.length) return argsToNormalize;
 
-  const normalizedProperties = new Map(properties.map((property) => [normalizeToolName(property), property]));
+  const normalizedProperties = new Map(schema.properties.map((property) => [normalizeToolName(property), property]));
   const output: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(args)) {
-    const target = properties.includes(key)
-      ? key
-      : normalizedProperties.get(normalizeToolName(key)) || aliasToolArgument(key, properties);
-    output[target || key] = value;
+  const priorities = new Map<string, number>();
+  for (const [key, value] of Object.entries(argsToNormalize)) {
+    const mapped = mapToolArgument(key, schema.properties, normalizedProperties, tool?.name);
+    if (!mapped) {
+      if (schema.allowAdditionalProperties) output[key] = value;
+      continue;
+    }
+    const previous = priorities.get(mapped.target) ?? -1;
+    if (mapped.priority >= previous) {
+      output[mapped.target] = value;
+      priorities.set(mapped.target, mapped.priority);
+    }
   }
   return output;
 }
 
-function toolParameterProperties(tool: OpenAiToolSpec | undefined): string[] {
+function toolParameterSchema(tool: OpenAiToolSpec | undefined): {
+  properties: string[];
+  allowAdditionalProperties: boolean;
+} {
   const parameters = isRecord(tool?.parameters) ? tool.parameters : undefined;
   const properties = isRecord(parameters?.properties) ? parameters.properties : undefined;
-  return properties ? Object.keys(properties) : [];
+  return {
+    properties: properties ? Object.keys(properties) : [],
+    allowAdditionalProperties: parameters?.additionalProperties === true || isRecord(parameters?.additionalProperties)
+  };
 }
 
-function aliasToolArgument(key: string, properties: string[]): string | undefined {
+function expandToolArguments(args: Record<string, unknown>): Record<string, unknown> {
+  const output: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(args)) {
+    const normalized = normalizeToolName(key);
+    const nested = recordArgumentValue(value);
+    if (nested && ["arguments", "args", "input", "parameters", "params"].includes(normalized)) {
+      Object.assign(output, expandToolArguments(nested));
+      continue;
+    }
+    if (nested && normalized === "targeting") {
+      Object.assign(output, expandToolArguments(nested));
+      continue;
+    }
+    output[key] = value;
+  }
+  return output;
+}
+
+function recordArgumentValue(value: unknown): Record<string, unknown> | null {
+  if (isRecord(value)) return value;
+  if (typeof value !== "string" || !value.trim().startsWith("{")) return null;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function mapToolArgument(
+  key: string,
+  properties: string[],
+  normalizedProperties: Map<string, string>,
+  toolName: string | undefined
+): { target: string; priority: number } | null {
+  const exact = properties.includes(key) ? key : normalizedProperties.get(normalizeToolName(key));
+  if (exact) return { target: exact, priority: 100 };
+  return aliasToolArgument(key, properties, normalizedProperties, toolName);
+}
+
+function aliasToolArgument(
+  key: string,
+  properties: string[],
+  normalizedProperties: Map<string, string>,
+  toolName: string | undefined
+): { target: string; priority: number } | null {
   const normalized = normalizeToolName(key);
-  const aliases: Record<string, string[]> = {
-    globpattern: ["pattern"],
-    pattern: ["pattern"],
-    targeting: ["path", "directory", "cwd"],
-    targetdirectory: ["path", "directory", "cwd"],
-    filepath: ["filePath", "path"],
-    targetfile: ["filePath", "path"],
-    absolutepath: ["filePath", "path"],
-    path: ["filePath", "path"],
-    commandline: ["command"],
-    cmd: ["command"],
-    newcontents: ["content", "newString"],
-    contents: ["content"]
+  const rules = [...toolSpecificArgumentAliases(normalizeToolName(toolName || ""), normalized), ...commonArgumentAliases(normalized)];
+  for (const rule of rules) {
+    const target = firstMatchingProperty(rule.candidates, properties, normalizedProperties);
+    if (target) return { target, priority: rule.priority };
+  }
+  return null;
+}
+
+function firstMatchingProperty(
+  candidates: string[],
+  properties: string[],
+  normalizedProperties: Map<string, string>
+): string | undefined {
+  for (const candidate of candidates) {
+    if (properties.includes(candidate)) return candidate;
+    const normalized = normalizedProperties.get(normalizeToolName(candidate));
+    if (normalized) return normalized;
+  }
+  return undefined;
+}
+
+function commonArgumentAliases(normalized: string): Array<{ candidates: string[]; priority: number }> {
+  const aliases: Record<string, Array<{ candidates: string[]; priority: number }>> = {
+    absolutepath: [{ candidates: ["filePath", "path", "file", "filename"], priority: 80 }],
+    commandline: [{ candidates: ["command", "cmd", "script"], priority: 80 }],
+    contents: [{ candidates: ["content", "newString", "text"], priority: 70 }],
+    cwd: [{ candidates: ["cwd", "directory", "path", "pattern"], priority: 45 }],
+    directory: [{ candidates: ["directory", "cwd", "path", "pattern"], priority: 45 }],
+    filepath: [{ candidates: ["filePath", "path", "file", "filename"], priority: 90 }],
+    filename: [{ candidates: ["filePath", "path", "file", "filename"], priority: 75 }],
+    glob: [{ candidates: ["pattern", "glob", "include"], priority: 85 }],
+    globpattern: [{ candidates: ["pattern", "glob", "include"], priority: 95 }],
+    include: [{ candidates: ["include", "pattern", "glob"], priority: 70 }],
+    newcontents: [{ candidates: ["content", "newString", "replacement", "text"], priority: 85 }],
+    newstring: [{ candidates: ["newString", "replacement", "content"], priority: 95 }],
+    newtext: [{ candidates: ["newString", "replacement", "content", "text"], priority: 85 }],
+    oldcontents: [{ candidates: ["oldString", "old", "search", "text"], priority: 80 }],
+    oldstring: [{ candidates: ["oldString", "old", "search"], priority: 95 }],
+    oldtext: [{ candidates: ["oldString", "old", "search", "text"], priority: 85 }],
+    pattern: [{ candidates: ["pattern", "query", "regex", "search"], priority: 80 }],
+    query: [{ candidates: ["query", "pattern", "search", "prompt"], priority: 80 }],
+    regex: [{ candidates: ["pattern", "regex", "query"], priority: 75 }],
+    replacement: [{ candidates: ["newString", "replacement", "content"], priority: 85 }],
+    script: [{ candidates: ["command", "script", "cmd"], priority: 75 }],
+    search: [{ candidates: ["pattern", "query", "oldString", "search"], priority: 70 }],
+    searchstring: [{ candidates: ["pattern", "query", "oldString", "search"], priority: 80 }],
+    targetdirectory: [{ candidates: ["directory", "cwd", "path", "pattern"], priority: 55 }],
+    targetfile: [{ candidates: ["filePath", "path", "file", "filename"], priority: 90 }],
+    targeting: [{ candidates: ["path", "directory", "cwd", "pattern", "filePath"], priority: 45 }],
+    url: [{ candidates: ["url", "uri", "href"], priority: 90 }]
   };
-  const candidates = aliases[normalized] ?? [];
-  return candidates.find((candidate) => properties.includes(candidate));
+  if (normalized === "cmd") return [{ candidates: ["command", "cmd", "script"], priority: 95 }];
+  if (normalized === "path") return [{ candidates: ["filePath", "path", "directory", "cwd", "pattern"], priority: 75 }];
+  if (normalized === "prompt") return [{ candidates: ["prompt", "description", "instructions", "query"], priority: 80 }];
+  if (normalized === "tasks") return [{ candidates: ["todos", "tasks", "items"], priority: 75 }];
+  if (normalized === "todo" || normalized === "items") return [{ candidates: ["todos", "items", "tasks"], priority: 70 }];
+  return aliases[normalized] ?? [];
+}
+
+function toolSpecificArgumentAliases(tool: string, normalized: string): Array<{ candidates: string[]; priority: number }> {
+  if (["glob", "fileglob", "filesearch", "findfiles"].includes(tool)) {
+    if (["globpattern", "glob", "include", "pattern"].includes(normalized)) {
+      return [{ candidates: ["pattern", "glob", "include"], priority: 98 }];
+    }
+    if (["targeting", "targetdirectory", "cwd", "directory", "path"].includes(normalized)) {
+      return [{ candidates: ["pattern", "path", "directory", "cwd"], priority: 40 }];
+    }
+  }
+  if (["grep", "search", "searchfiles"].includes(tool)) {
+    if (["query", "search", "searchstring", "regex", "pattern"].includes(normalized)) {
+      return [{ candidates: ["pattern", "query", "regex", "search"], priority: 95 }];
+    }
+    if (["globpattern", "glob", "include"].includes(normalized)) {
+      return [{ candidates: ["include", "glob", "files", "pattern"], priority: 75 }];
+    }
+  }
+  if (["read", "readfile", "openfile"].includes(tool)) {
+    if (["targeting", "targetfile", "filepath", "absolutepath", "path", "file"].includes(normalized)) {
+      return [{ candidates: ["filePath", "path", "file", "filename"], priority: 95 }];
+    }
+  }
+  if (["write", "writefile", "createfile"].includes(tool)) {
+    if (["targeting", "targetfile", "filepath", "absolutepath", "path", "file"].includes(normalized)) {
+      return [{ candidates: ["filePath", "path", "file", "filename"], priority: 95 }];
+    }
+    if (["newcontents", "contents", "content", "text"].includes(normalized)) {
+      return [{ candidates: ["content", "text", "newString"], priority: 95 }];
+    }
+  }
+  if (["edit", "editfile", "replacefile", "searchreplace"].includes(tool)) {
+    if (["targeting", "targetfile", "filepath", "absolutepath", "path", "file"].includes(normalized)) {
+      return [{ candidates: ["filePath", "path", "file", "filename"], priority: 95 }];
+    }
+    if (["oldstring", "oldtext", "oldcontents", "search", "searchstring"].includes(normalized)) {
+      return [{ candidates: ["oldString", "old", "search"], priority: 95 }];
+    }
+    if (["newstring", "newtext", "newcontents", "replacement", "replace", "content"].includes(normalized)) {
+      return [{ candidates: ["newString", "replacement", "content"], priority: 95 }];
+    }
+  }
+  if (["bash", "shell", "terminal", "runterminalcmd"].includes(tool)) {
+    if (["cmd", "commandline", "command", "script"].includes(normalized)) {
+      return [{ candidates: ["command", "cmd", "script"], priority: 95 }];
+    }
+  }
+  if (["webfetch", "fetch", "web"].includes(tool)) {
+    if (["url", "uri", "href"].includes(normalized)) return [{ candidates: ["url", "uri", "href"], priority: 95 }];
+    if (["prompt", "query", "instructions"].includes(normalized)) {
+      return [{ candidates: ["prompt", "query", "instructions"], priority: 90 }];
+    }
+  }
+  if (["todowrite", "todo"].includes(tool) && ["todos", "tasks", "items"].includes(normalized)) {
+    return [{ candidates: ["todos", "tasks", "items"], priority: 95 }];
+  }
+  if (tool === "task") {
+    if (["prompt", "instructions", "query"].includes(normalized)) {
+      return [{ candidates: ["prompt", "description", "instructions"], priority: 90 }];
+    }
+    if (["subagenttype", "agent", "agenttype"].includes(normalized)) {
+      return [{ candidates: ["subagent_type", "subagentType", "agent"], priority: 90 }];
+    }
+  }
+  return [];
+}
+
+function toolNameAliases(normalized: string): string[] {
+  const aliases: Record<string, string[]> = {
+    createfile: ["write"],
+    editfile: ["edit"],
+    fileglob: ["glob"],
+    filesearch: ["glob", "grep"],
+    findfiles: ["glob"],
+    openfile: ["read"],
+    readfile: ["read"],
+    replacefile: ["edit"],
+    runterminalcmd: ["bash", "shell"],
+    searchfiles: ["grep", "glob"],
+    searchreplace: ["edit"],
+    terminal: ["bash", "shell"],
+    writefile: ["write"]
+  };
+  return aliases[normalized] ?? [];
 }
 
 function estimateTokens(chars: number): number {

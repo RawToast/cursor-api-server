@@ -249,4 +249,78 @@ describe("OpenAI compatibility adapter", () => {
       ]
     });
   });
+
+  it("normalizes Cursor-style tool names and arguments to the client schema", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "write",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              filePath: { type: "string" },
+              content: { type: "string" }
+            },
+            required: ["filePath", "content"]
+          }
+        },
+        {
+          name: "edit",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              filePath: { type: "string" },
+              oldString: { type: "string" },
+              newString: { type: "string" }
+            },
+            required: ["filePath", "oldString", "newString"]
+          }
+        },
+        {
+          name: "bash",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: { command: { type: "string" } },
+            required: ["command"]
+          }
+        }
+      ],
+      toolCalls: [
+        { name: "write_file", arguments: { target_file: "index.html", new_contents: "<main>Hello</main>", extra: "drop me" } },
+        { name: "edit_file", arguments: { path: "index.html", old_string: "Hello", new_contents: "Hi" } },
+        { name: "run_terminal_cmd", arguments: { cmd: "npm test" } }
+      ]
+    });
+
+    expect(toolCalls.map((call) => call.function.name)).toEqual(["write", "edit", "bash"]);
+    expect(toolCalls.map((call) => JSON.parse(call.function.arguments))).toEqual([
+      { filePath: "index.html", content: "<main>Hello</main>" },
+      { filePath: "index.html", oldString: "Hello", newString: "Hi" },
+      { command: "npm test" }
+    ]);
+  });
+
+  it("prefers glob patterns over Cursor targeting when both are emitted", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "glob",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: { pattern: { type: "string" } },
+            required: ["pattern"]
+          }
+        }
+      ],
+      toolCalls: [{ name: "file_search", arguments: { targeting: "/Users/example/project/**", glob_pattern: "*.ts" } }]
+    });
+
+    expect(JSON.parse(toolCalls[0].function.arguments)).toEqual({ pattern: "*.ts" });
+  });
 });
