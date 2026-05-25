@@ -1,10 +1,11 @@
 import CursorAPICore
+import Darwin
 import Foundation
 import XCTest
 
 final class LocalAPIServerTests: XCTestCase {
     func testHealthEndpointReportsLoopbackAndSDKReadiness() async throws {
-        let port = UInt16(Int.random(in: 10_000...14_999))
+        let port = try unusedTCPPort()
         let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness())
         try server.start(port: port)
         defer { server.stop() }
@@ -37,7 +38,7 @@ final class LocalAPIServerTests: XCTestCase {
     }
 
     func testHealthEndpointReportsSanitizedReadyState() async throws {
-        let port = UInt16(Int.random(in: 10_000...14_999))
+        let port = try unusedTCPPort()
         let settings = CursorAPISettings(
             port: port,
             cursorAPIKey: "crsr_test",
@@ -69,7 +70,7 @@ final class LocalAPIServerTests: XCTestCase {
     }
 
     func testHealthEndpointReportsRoutingMissingWhenKeyIsPresent() async throws {
-        let port = UInt16(Int.random(in: 10_000...14_999))
+        let port = try unusedTCPPort()
         let settings = CursorAPISettings(port: port, cursorAPIKey: "crsr_test")
         let server = LocalAPIServer(settingsProvider: { settings }, harness: MockHarness())
         try server.start(port: port)
@@ -88,7 +89,7 @@ final class LocalAPIServerTests: XCTestCase {
     }
 
     func testStartFailsWhenPortIsAlreadyInUse() throws {
-        let port = UInt16(Int.random(in: 10_000...14_999))
+        let port = try unusedTCPPort()
         let first = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness())
         let second = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness())
         try first.start(port: port)
@@ -104,7 +105,7 @@ final class LocalAPIServerTests: XCTestCase {
     }
 
     func testModelsEndpoint() async throws {
-        let port = UInt16(Int.random(in: 39_000...49_000))
+        let port = try unusedTCPPort()
         let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness())
         try server.start(port: port)
         defer { server.stop() }
@@ -118,7 +119,7 @@ final class LocalAPIServerTests: XCTestCase {
     }
 
     func testModelsEndpointAcceptsOriginBaseURLAndTrailingSlash() async throws {
-        let port = UInt16(Int.random(in: 39_000...49_000))
+        let port = try unusedTCPPort()
         let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness())
         try server.start(port: port)
         defer { server.stop() }
@@ -132,7 +133,7 @@ final class LocalAPIServerTests: XCTestCase {
     }
 
     func testModelRetrieveEndpoint() async throws {
-        let port = UInt16(Int.random(in: 39_000...49_000))
+        let port = try unusedTCPPort()
         let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness())
         try server.start(port: port)
         defer { server.stop() }
@@ -152,7 +153,7 @@ final class LocalAPIServerTests: XCTestCase {
     }
 
     func testModelRetrieveEndpointAcceptsDashAlias() async throws {
-        let port = UInt16(Int.random(in: 39_000...49_000))
+        let port = try unusedTCPPort()
         let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness())
         try server.start(port: port)
         defer { server.stop() }
@@ -166,7 +167,7 @@ final class LocalAPIServerTests: XCTestCase {
     }
 
     func testModelRetrieveEndpointAcceptsProviderPrefixedAliases() async throws {
-        let port = UInt16(Int.random(in: 39_000...49_000))
+        let port = try unusedTCPPort()
         let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness())
         try server.start(port: port)
         defer { server.stop() }
@@ -186,7 +187,7 @@ final class LocalAPIServerTests: XCTestCase {
     }
 
     func testUnknownModelRetrieveEndpointReturns404() async throws {
-        let port = UInt16(Int.random(in: 39_000...49_000))
+        let port = try unusedTCPPort()
         let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness())
         try server.start(port: port)
         defer { server.stop() }
@@ -198,7 +199,7 @@ final class LocalAPIServerTests: XCTestCase {
     }
 
     func testRequestModelAliasesNormalizeToComposerModels() async throws {
-        let port = UInt16(Int.random(in: 49_001...59_000))
+        let port = try unusedTCPPort()
         let recorder = PreparedRequestRecorder()
         let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness(recorder: recorder))
         try server.start(port: port)
@@ -221,7 +222,7 @@ final class LocalAPIServerTests: XCTestCase {
     }
 
     func testUnknownRequestModelsReturn404() async throws {
-        let port = UInt16(Int.random(in: 49_001...59_000))
+        let port = try unusedTCPPort()
         let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness())
         try server.start(port: port)
         defer { server.stop() }
@@ -246,7 +247,7 @@ final class LocalAPIServerTests: XCTestCase {
     }
 
     func testCORSPreflightAllowsSessionHeaders() async throws {
-        let port = UInt16(Int.random(in: 63_001...64_000))
+        let port = try unusedTCPPort()
         let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness())
         try server.start(port: port)
         defer { server.stop() }
@@ -268,7 +269,7 @@ final class LocalAPIServerTests: XCTestCase {
     }
 
     func testCompletionsEndpoint() async throws {
-        let port = UInt16(Int.random(in: 49_001...59_000))
+        let port = try unusedTCPPort()
         let recorder = PreparedRequestRecorder()
         let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness(recorder: recorder))
         try server.start(port: port)
@@ -291,7 +292,7 @@ final class LocalAPIServerTests: XCTestCase {
     }
 
     func testCompletionsEndpointAcceptsOriginBaseURL() async throws {
-        let port = UInt16(Int.random(in: 49_001...59_000))
+        let port = try unusedTCPPort()
         let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness())
         try server.start(port: port)
         defer { server.stop() }
@@ -309,7 +310,7 @@ final class LocalAPIServerTests: XCTestCase {
     }
 
     func testCompletionsStreamingEndpoint() async throws {
-        let port = UInt16(Int.random(in: 49_001...59_000))
+        let port = try unusedTCPPort()
         let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness(events: [
             .text("hel"),
             .text("lo"),
@@ -334,7 +335,7 @@ final class LocalAPIServerTests: XCTestCase {
     }
 
     func testChatCompletionsEndpoint() async throws {
-        let port = UInt16(Int.random(in: 49_001...59_000))
+        let port = try unusedTCPPort()
         let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness())
         try server.start(port: port)
         defer { server.stop() }
@@ -352,7 +353,7 @@ final class LocalAPIServerTests: XCTestCase {
     }
 
     func testChatCompletionsEndpointAcceptsOriginBaseURL() async throws {
-        let port = UInt16(Int.random(in: 49_001...59_000))
+        let port = try unusedTCPPort()
         let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness())
         try server.start(port: port)
         defer { server.stop() }
@@ -370,7 +371,7 @@ final class LocalAPIServerTests: XCTestCase {
     }
 
     func testResponsesEndpoint() async throws {
-        let port = UInt16(Int.random(in: 29_000...38_999))
+        let port = try unusedTCPPort()
         let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness())
         try server.start(port: port)
         defer { server.stop() }
@@ -388,7 +389,7 @@ final class LocalAPIServerTests: XCTestCase {
     }
 
     func testResponsesEndpointAcceptsOriginBaseURLForStorageAndRetrieval() async throws {
-        let port = UInt16(Int.random(in: 29_000...38_999))
+        let port = try unusedTCPPort()
         let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness())
         try server.start(port: port)
         defer { server.stop() }
@@ -415,7 +416,7 @@ final class LocalAPIServerTests: XCTestCase {
     }
 
     func testResponsesEndpointStoresResponseForRetrieval() async throws {
-        let port = UInt16(Int.random(in: 29_000...38_999))
+        let port = try unusedTCPPort()
         let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness())
         try server.start(port: port)
         defer { server.stop() }
@@ -432,7 +433,7 @@ final class LocalAPIServerTests: XCTestCase {
     }
 
     func testResponsesEndpointStoresInputItemsForRetrieval() async throws {
-        let port = UInt16(Int.random(in: 29_000...38_999))
+        let port = try unusedTCPPort()
         let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness())
         try server.start(port: port)
         defer { server.stop() }
@@ -458,7 +459,7 @@ final class LocalAPIServerTests: XCTestCase {
     }
 
     func testResponsesEndpointInputItemsPreserveStructuredToolOutputs() async throws {
-        let port = UInt16(Int.random(in: 29_000...38_999))
+        let port = try unusedTCPPort()
         let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness())
         try server.start(port: port)
         defer { server.stop() }
@@ -488,7 +489,7 @@ final class LocalAPIServerTests: XCTestCase {
     }
 
     func testResponsesStoreFalseDoesNotPersistForRetrieval() async throws {
-        let port = UInt16(Int.random(in: 29_000...38_999))
+        let port = try unusedTCPPort()
         let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness())
         try server.start(port: port)
         defer { server.stop() }
@@ -506,7 +507,7 @@ final class LocalAPIServerTests: XCTestCase {
     }
 
     func testStreamingResponsesStoreCompletedResponseForRetrieval() async throws {
-        let port = UInt16(Int.random(in: 29_000...38_999))
+        let port = try unusedTCPPort()
         let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness())
         try server.start(port: port)
         defer { server.stop() }
@@ -532,7 +533,7 @@ final class LocalAPIServerTests: XCTestCase {
     }
 
     func testResponsesStateIsBoundedAndVisibleInHealth() async throws {
-        let port = UInt16(Int.random(in: 29_000...38_999))
+        let port = try unusedTCPPort()
         let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness(), responseStateLimit: 2)
         try server.start(port: port)
         defer { server.stop() }
@@ -567,7 +568,7 @@ final class LocalAPIServerTests: XCTestCase {
     }
 
     func testResponsesPreviousResponseIDContinuesSameSDKSession() async throws {
-        let port = UInt16(Int.random(in: 29_000...38_999))
+        let port = try unusedTCPPort()
         let recorder = PreparedRequestRecorder()
         let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness(recorder: recorder))
         try server.start(port: port)
@@ -586,7 +587,7 @@ final class LocalAPIServerTests: XCTestCase {
     }
 
     func testResponsesPreviousResponseIDCarriesFunctionCallMemory() async throws {
-        let port = UInt16(Int.random(in: 29_000...38_999))
+        let port = try unusedTCPPort()
         let recorder = PreparedRequestRecorder()
         let toolCall = CursorToolCall(name: "shell", arguments: ["command": .string("pwd")])
         let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness(events: [
@@ -628,7 +629,7 @@ final class LocalAPIServerTests: XCTestCase {
     }
 
     func testResponsesProjectMetadataSeparatesAndReusesSDKSessions() async throws {
-        let port = UInt16(Int.random(in: 29_000...38_999))
+        let port = try unusedTCPPort()
         let recorder = PreparedRequestRecorder()
         let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness(recorder: recorder))
         try server.start(port: port)
@@ -648,7 +649,7 @@ final class LocalAPIServerTests: XCTestCase {
     }
 
     func testResponsesConcurrentProjectMetadataKeepsIndependentSessions() async throws {
-        let port = UInt16(Int.random(in: 29_000...38_999))
+        let port = try unusedTCPPort()
         let recorder = PreparedRequestRecorder()
         let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness(delayNanoseconds: 50_000_000, recorder: recorder))
         try server.start(port: port)
@@ -716,7 +717,7 @@ final class LocalAPIServerTests: XCTestCase {
     }
 
     func testResponsesEndpointReturnsFunctionCallOutputItems() async throws {
-        let port = UInt16(Int.random(in: 24_000...28_999))
+        let port = try unusedTCPPort()
         let toolCall = CursorToolCall(name: "shell", arguments: ["command": .string("pwd")])
         let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness(events: [
             .toolCall(toolCall),
@@ -940,7 +941,7 @@ final class LocalAPIServerTests: XCTestCase {
     }
 
     func testChatCompletionsStreamingFlushesTextDeltas() async throws {
-        let port = UInt16(Int.random(in: 20_000...28_999))
+        let port = try unusedTCPPort()
         let harness = MockHarness(
             events: [
                 .text("first"),
@@ -977,7 +978,7 @@ final class LocalAPIServerTests: XCTestCase {
     }
 
     func testResponsesStreamingUsesResponsesEvents() async throws {
-        let port = UInt16(Int.random(in: 15_000...19_999))
+        let port = try unusedTCPPort()
         let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness(events: [
             .text("ok"),
             .done(CursorSDKOutput(text: "ok", agentID: "agent-test", runID: "run-test"))
@@ -1002,7 +1003,7 @@ final class LocalAPIServerTests: XCTestCase {
     }
 
     func testResponsesStreamingEmitsFunctionCallEvents() async throws {
-        let port = UInt16(Int.random(in: 60_000...62_000))
+        let port = try unusedTCPPort()
         let toolCall = CursorToolCall(name: "shell", arguments: ["command": .string("pwd")])
         let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness(events: [
             .toolCall(toolCall),
@@ -1051,6 +1052,44 @@ private func sendResponseRequest(port: UInt16, body: String) async throws {
 }
 
 private extension LocalAPIServerTests {
+    func unusedTCPPort() throws -> UInt16 {
+        let descriptor = socket(AF_INET, SOCK_STREAM, 0)
+        guard descriptor >= 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EINVAL)
+        }
+        defer {
+            close(descriptor)
+        }
+
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = in_port_t(0).bigEndian
+        address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+
+        let bindResult = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { rebound in
+                Darwin.bind(descriptor, rebound, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard bindResult == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EINVAL)
+        }
+
+        var boundAddress = sockaddr_in()
+        var boundLength = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let nameResult = withUnsafeMutablePointer(to: &boundAddress) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { rebound in
+                getsockname(descriptor, rebound, &boundLength)
+            }
+        }
+        guard nameResult == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EINVAL)
+        }
+
+        return UInt16(bigEndian: boundAddress.sin_port)
+    }
+
     func postResponse(port: UInt16, body: String) async throws -> [String: Any] {
         var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/responses")!)
         request.httpMethod = "POST"
