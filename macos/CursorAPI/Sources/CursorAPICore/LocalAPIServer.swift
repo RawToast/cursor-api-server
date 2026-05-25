@@ -89,10 +89,11 @@ public final class LocalAPIServer: @unchecked Sendable {
 
     private func route(_ request: HTTPRequest) async -> RoutedHTTPResponse {
         do {
+            let path = normalizedAPIPath(request.path)
             if request.method == "OPTIONS" {
                 return .response(HTTPResponse(status: 204, headers: corsHeaders(), body: Data()))
             }
-            if request.method == "GET", request.path == "/health" {
+            if request.method == "GET", path == "/health" {
                 let settings = settingsProvider()
                 return try .response(HTTPResponse.json([
                     "ok": true,
@@ -102,16 +103,16 @@ public final class LocalAPIServer: @unchecked Sendable {
                     "sdkConfigured": settings.hasCursorSDKConfiguration
                 ]))
             }
-            if request.method == "GET", request.path == "/v1/models" {
+            if request.method == "GET", path == "/v1/models" {
                 return try .response(withCORS(HTTPResponse.json(OpenAICompatibility.modelList())))
             }
-            if request.method == "GET", let modelID = modelID(from: request.path) {
+            if request.method == "GET", let modelID = modelID(from: path) {
                 guard let model = ComposerModels.model(for: modelID) else {
                     throw CursorAPIError.notFound
                 }
                 return try .response(withCORS(HTTPResponse.json(OpenAICompatibility.modelObject(model))))
             }
-            if request.method == "POST", request.path == "/v1/chat/completions" {
+            if request.method == "POST", path == "/v1/chat/completions" {
                 var prepared = try OpenAICompatibility.prepareChatRequest(request.body)
                 prepared.sessionKey = sessionAffinity(request)
                 let settings = settingsProvider()
@@ -127,7 +128,7 @@ public final class LocalAPIServer: @unchecked Sendable {
                 let output = try await harness.complete(prepared: prepared, settings: settings, authorization: request.header("authorization"))
                 return try .response(withCORS(HTTPResponse.json(OpenAICompatibility.chatCompletionResponse(id: id, created: created, prepared: prepared, output: output))))
             }
-            if request.method == "POST", request.path == "/v1/responses" {
+            if request.method == "POST", path == "/v1/responses" {
                 var prepared = try OpenAICompatibility.prepareResponsesRequest(request.body)
                 let settings = settingsProvider()
                 let id = "resp_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
@@ -156,13 +157,13 @@ public final class LocalAPIServer: @unchecked Sendable {
                 }
                 return .response(withCORS(response))
             }
-            if request.method == "GET", let responseID = responseInputItemsID(from: request.path) {
+            if request.method == "GET", let responseID = responseInputItemsID(from: path) {
                 guard let data = await responseSessions.responseInputItemsData(responseID: responseID) else {
                     throw CursorAPIError.notFound
                 }
                 return .response(withCORS(HTTPResponse.data(data, contentType: "application/json; charset=utf-8")))
             }
-            if request.method == "GET", let responseID = responseID(from: request.path) {
+            if request.method == "GET", let responseID = responseID(from: path) {
                 guard let data = await responseSessions.responseData(responseID: responseID) else {
                     throw CursorAPIError.notFound
                 }
@@ -438,6 +439,23 @@ public final class LocalAPIServer: @unchecked Sendable {
             "Cache-Control": "no-cache, no-transform",
             "X-Accel-Buffering": "no"
         ]
+    }
+
+    private func normalizedAPIPath(_ path: String) -> String {
+        var value = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        while value.count > 1, value.hasSuffix("/") {
+            value.removeLast()
+        }
+        if value == "/models" || value.hasPrefix("/models/") {
+            return "/v1\(value)"
+        }
+        if value == "/chat/completions" {
+            return "/v1/chat/completions"
+        }
+        if value == "/responses" || value.hasPrefix("/responses/") {
+            return "/v1\(value)"
+        }
+        return value
     }
 
     private func responseID(from path: String) -> String? {
