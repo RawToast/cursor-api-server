@@ -28,11 +28,11 @@ final class SettingsTests: XCTestCase {
         XCTAssertFalse(settings.hasInlineCursorAPIKey)
     }
 
-    func testBridgeConfigurationDoesNotRequireAPIKey() {
+    func testRoutingConfigurationDoesNotRequireAPIKey() {
         let settings = CursorAPISettings(
             cursorAPIKey: "",
             cursorAPIBaseURL: "https://exchange.example",
-            backendBaseURL: "https://bridge.example",
+            backendBaseURL: "https://routing.example",
             localAgentEndpoint: "/sdk/run"
         )
 
@@ -40,10 +40,10 @@ final class SettingsTests: XCTestCase {
         XCTAssertTrue(settings.hasCursorSDKConfiguration)
     }
 
-    func testBridgeConfigurationRequiresKeyExchangeOrigin() {
+    func testRoutingConfigurationRequiresKeyExchangeOrigin() {
         let settings = CursorAPISettings(
             cursorAPIKey: "",
-            backendBaseURL: "https://bridge.example",
+            backendBaseURL: "https://routing.example",
             localAgentEndpoint: "/sdk/run"
         )
 
@@ -51,11 +51,11 @@ final class SettingsTests: XCTestCase {
         XCTAssertFalse(settings.hasCursorSDKConfiguration)
     }
 
-    func testLegacyCursorAPIBaseURLDoesNotCountAsBridgeConfiguration() {
+    func testLegacyCursorAPIBaseURLDoesNotCountAsRoutingConfiguration() {
         let settings = CursorAPISettings(
             cursorAPIKey: "",
             cursorAPIBaseURL: CursorAPISettings.legacyCursorAPIBaseURL,
-            backendBaseURL: "https://bridge.example",
+            backendBaseURL: "https://routing.example",
             localAgentEndpoint: "/sdk/run"
         )
 

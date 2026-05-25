@@ -15,6 +15,7 @@ final class LocalAPIServerTests: XCTestCase {
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         XCTAssertEqual(object["host"] as? String, "127.0.0.1")
         XCTAssertEqual(object["service"] as? String, CursorAPIBrand.displayName)
+        XCTAssertEqual(object["routingConfigured"] as? Bool, false)
         XCTAssertEqual(object["sdkConfigured"] as? Bool, false)
         XCTAssertEqual(object["apiKeyConfigured"] as? Bool, false)
         XCTAssertEqual(object["ready"] as? Bool, false)
@@ -28,11 +29,11 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertEqual((responses["inputItems"] as? NSNumber)?.intValue, 0)
         XCTAssertEqual((responses["toolCallMemory"] as? NSNumber)?.intValue, 0)
         XCTAssertEqual((responses["maxStored"] as? NSNumber)?.intValue, 512)
-        let bridge = try XCTUnwrap(object["bridge"] as? [String: Any])
-        XCTAssertEqual(bridge["configured"] as? Bool, false)
-        XCTAssertEqual(bridge["keyExchangeConfigured"] as? Bool, false)
-        XCTAssertEqual(bridge["backendConfigured"] as? Bool, false)
-        XCTAssertEqual(bridge["localAgentConfigured"] as? Bool, false)
+        let routing = try XCTUnwrap(object["routing"] as? [String: Any])
+        XCTAssertEqual(routing["configured"] as? Bool, false)
+        XCTAssertEqual(routing["keyExchangeConfigured"] as? Bool, false)
+        XCTAssertEqual(routing["backendConfigured"] as? Bool, false)
+        XCTAssertEqual(routing["localAgentConfigured"] as? Bool, false)
     }
 
     func testHealthEndpointReportsSanitizedReadyState() async throws {
@@ -58,12 +59,32 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertEqual(object["ready"] as? Bool, true)
         XCTAssertEqual(object["status"] as? String, "ready")
         XCTAssertEqual(object["apiKeyConfigured"] as? Bool, true)
+        XCTAssertEqual(object["routingConfigured"] as? Bool, true)
         XCTAssertEqual(object["sdkConfigured"] as? Bool, true)
         XCTAssertEqual(object["missing"] as? [String], [])
         XCTAssertFalse(text.contains("crsr_test"))
         XCTAssertFalse(text.contains("exchange.example"))
         XCTAssertFalse(text.contains("private-backend.example"))
         XCTAssertFalse(text.contains("/private/sdk/run"))
+    }
+
+    func testHealthEndpointReportsRoutingMissingWhenKeyIsPresent() async throws {
+        let port = UInt16(Int.random(in: 10_000...14_999))
+        let settings = CursorAPISettings(port: port, cursorAPIKey: "crsr_test")
+        let server = LocalAPIServer(settingsProvider: { settings }, harness: MockHarness())
+        try server.start(port: port)
+        defer { server.stop() }
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        let (data, response) = try await URLSession.shared.data(from: URL(string: "http://127.0.0.1:\(port)/health")!)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+
+        XCTAssertEqual(object["ready"] as? Bool, false)
+        XCTAssertEqual(object["status"] as? String, "routing_missing")
+        XCTAssertEqual(object["apiKeyConfigured"] as? Bool, true)
+        XCTAssertEqual(object["routingConfigured"] as? Bool, false)
+        XCTAssertEqual(object["missing"] as? [String], ["cursorAPIBaseURL", "backendBaseURL", "localAgentEndpoint"])
     }
 
     func testStartFailsWhenPortIsAlreadyInUse() throws {

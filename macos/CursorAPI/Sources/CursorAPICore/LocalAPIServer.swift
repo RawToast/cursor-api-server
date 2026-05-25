@@ -592,7 +592,7 @@ public final class LocalAPIServer: @unchecked Sendable {
         let keyExchangeConfigured = settings.hasCursorAPIExchangeConfiguration
         let backendConfigured = settings.backendBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty != nil
         let localAgentConfigured = settings.localAgentEndpoint.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty != nil
-        let bridgeConfigured = keyExchangeConfigured && backendConfigured && localAgentConfigured
+        let routingConfigured = keyExchangeConfigured && backendConfigured && localAgentConfigured
         let apiKeyConfigured = settings.hasCursorAPIKey
         let missing = [
             apiKeyConfigured ? nil : "cursorAPIKey",
@@ -601,21 +601,22 @@ public final class LocalAPIServer: @unchecked Sendable {
             localAgentConfigured ? nil : "localAgentEndpoint"
         ].compactMap { $0 }
         let status: String
-        if apiKeyConfigured && bridgeConfigured {
+        if apiKeyConfigured && routingConfigured {
             status = "ready"
         } else if !apiKeyConfigured {
             status = "needs_api_key"
         } else {
-            status = "bridge_missing"
+            status = "routing_missing"
         }
         return [
             "ok": true,
-            "ready": apiKeyConfigured && bridgeConfigured,
+            "ready": apiKeyConfigured && routingConfigured,
             "status": status,
             "service": CursorAPIBrand.displayName,
             "baseUrl": settings.baseURL.absoluteString,
             "host": "127.0.0.1",
-            "sdkConfigured": bridgeConfigured,
+            "routingConfigured": routingConfigured,
+            "sdkConfigured": routingConfigured,
             "apiKeyConfigured": apiKeyConfigured,
             "missing": missing,
             "models": ComposerModels.all.map(\.id),
@@ -626,8 +627,8 @@ public final class LocalAPIServer: @unchecked Sendable {
                 "toolCallMemory": responseState.toolCallMemory,
                 "maxStored": responseState.maxEntries
             ],
-            "bridge": [
-                "configured": bridgeConfigured,
+            "routing": [
+                "configured": routingConfigured,
                 "keyExchangeConfigured": keyExchangeConfigured,
                 "backendConfigured": backendConfigured,
                 "localAgentConfigured": localAgentConfigured,
