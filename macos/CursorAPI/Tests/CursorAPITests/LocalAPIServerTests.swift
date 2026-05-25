@@ -16,7 +16,48 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertEqual(object["host"] as? String, "127.0.0.1")
         XCTAssertEqual(object["service"] as? String, CursorAPIBrand.displayName)
         XCTAssertEqual(object["sdkConfigured"] as? Bool, false)
+        XCTAssertEqual(object["apiKeyConfigured"] as? Bool, false)
+        XCTAssertEqual(object["ready"] as? Bool, false)
+        XCTAssertEqual(object["status"] as? String, "needs_api_key")
         XCTAssertEqual(object["baseUrl"] as? String, "http://127.0.0.1:\(port)/v1")
+        XCTAssertEqual(object["missing"] as? [String], ["cursorAPIKey", "cursorAPIBaseURL", "backendBaseURL", "localAgentEndpoint"])
+        XCTAssertEqual(object["models"] as? [String], ["composer-2.5", "composer-2.5-fast"])
+        let bridge = try XCTUnwrap(object["bridge"] as? [String: Any])
+        XCTAssertEqual(bridge["configured"] as? Bool, false)
+        XCTAssertEqual(bridge["keyExchangeConfigured"] as? Bool, false)
+        XCTAssertEqual(bridge["backendConfigured"] as? Bool, false)
+        XCTAssertEqual(bridge["localAgentConfigured"] as? Bool, false)
+    }
+
+    func testHealthEndpointReportsSanitizedReadyState() async throws {
+        let port = UInt16(Int.random(in: 10_000...14_999))
+        let settings = CursorAPISettings(
+            port: port,
+            cursorAPIKey: "crsr_test",
+            cursorAPIBaseURL: "https://exchange.example",
+            backendBaseURL: "https://private-backend.example",
+            localAgentEndpoint: "/private/sdk/run",
+            clientVersion: "sdk-test"
+        )
+        let server = LocalAPIServer(settingsProvider: { settings }, harness: MockHarness())
+        try server.start(port: port)
+        defer { server.stop() }
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        let (data, response) = try await URLSession.shared.data(from: URL(string: "http://127.0.0.1:\(port)/health")!)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let text = String(data: data, encoding: .utf8) ?? ""
+
+        XCTAssertEqual(object["ready"] as? Bool, true)
+        XCTAssertEqual(object["status"] as? String, "ready")
+        XCTAssertEqual(object["apiKeyConfigured"] as? Bool, true)
+        XCTAssertEqual(object["sdkConfigured"] as? Bool, true)
+        XCTAssertEqual(object["missing"] as? [String], [])
+        XCTAssertFalse(text.contains("crsr_test"))
+        XCTAssertFalse(text.contains("exchange.example"))
+        XCTAssertFalse(text.contains("private-backend.example"))
+        XCTAssertFalse(text.contains("/private/sdk/run"))
     }
 
     func testStartFailsWhenPortIsAlreadyInUse() throws {

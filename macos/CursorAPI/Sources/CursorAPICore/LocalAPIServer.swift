@@ -112,13 +112,7 @@ public final class LocalAPIServer: @unchecked Sendable {
             }
             if request.method == "GET", path == "/health" {
                 let settings = settingsProvider()
-                return try .response(HTTPResponse.json([
-                    "ok": true,
-                    "service": CursorAPIBrand.displayName,
-                    "baseUrl": settings.baseURL.absoluteString,
-                    "host": "127.0.0.1",
-                    "sdkConfigured": settings.hasCursorSDKConfiguration
-                ]))
+                return try .response(HTTPResponse.json(healthObject(settings: settings)))
             }
             if request.method == "GET", path == "/v1/models" {
                 return try .response(withCORS(HTTPResponse.json(OpenAICompatibility.modelList())))
@@ -586,6 +580,47 @@ public final class LocalAPIServer: @unchecked Sendable {
             ?? request.header("x-project-path")?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
             ?? request.header("x-workspace-path")?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
             ?? request.header("x-working-directory")?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
+    }
+
+    private func healthObject(settings: CursorAPISettings) -> [String: Any] {
+        let keyExchangeConfigured = settings.hasCursorAPIExchangeConfiguration
+        let backendConfigured = settings.backendBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty != nil
+        let localAgentConfigured = settings.localAgentEndpoint.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty != nil
+        let bridgeConfigured = keyExchangeConfigured && backendConfigured && localAgentConfigured
+        let apiKeyConfigured = settings.hasCursorAPIKey
+        let missing = [
+            apiKeyConfigured ? nil : "cursorAPIKey",
+            keyExchangeConfigured ? nil : "cursorAPIBaseURL",
+            backendConfigured ? nil : "backendBaseURL",
+            localAgentConfigured ? nil : "localAgentEndpoint"
+        ].compactMap { $0 }
+        let status: String
+        if apiKeyConfigured && bridgeConfigured {
+            status = "ready"
+        } else if !apiKeyConfigured {
+            status = "needs_api_key"
+        } else {
+            status = "bridge_missing"
+        }
+        return [
+            "ok": true,
+            "ready": apiKeyConfigured && bridgeConfigured,
+            "status": status,
+            "service": CursorAPIBrand.displayName,
+            "baseUrl": settings.baseURL.absoluteString,
+            "host": "127.0.0.1",
+            "sdkConfigured": bridgeConfigured,
+            "apiKeyConfigured": apiKeyConfigured,
+            "missing": missing,
+            "models": ComposerModels.all.map(\.id),
+            "bridge": [
+                "configured": bridgeConfigured,
+                "keyExchangeConfigured": keyExchangeConfigured,
+                "backendConfigured": backendConfigured,
+                "localAgentConfigured": localAgentConfigured,
+                "clientVersion": settings.clientVersion
+            ]
+        ]
     }
 }
 
