@@ -10,6 +10,37 @@ CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
 ICONSET_DIR="$RESOURCES_DIR/APIForCursor.iconset"
+REQUIRE_BUNDLED_TRANSPORT="${CURSOR_API_REQUIRE_BUNDLED_TRANSPORT:-0}"
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --release)
+      REQUIRE_BUNDLED_TRANSPORT=1
+      ;;
+    --development)
+      REQUIRE_BUNDLED_TRANSPORT=0
+      ;;
+    -h|--help)
+      cat <<USAGE
+Usage: $0 [--development|--release]
+
+  --development  Build a local development app. Missing bundled bridge defaults
+                 are allowed and the app will show Bridge Missing. This is the
+                 default.
+  --release      Refuse to package unless complete bundled Composer bridge
+                 defaults are available from local environment files or the
+                 current environment.
+USAGE
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      exit 64
+      ;;
+  esac
+  shift
+done
+export CURSOR_API_REQUIRE_BUNDLED_TRANSPORT="$REQUIRE_BUNDLED_TRANSPORT"
 
 swift build --package-path "$ROOT_DIR" -c release
 rm -rf "$APP_DIR" "$LEGACY_APP_DIR"
