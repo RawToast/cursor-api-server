@@ -255,6 +255,8 @@ final class AgentProvisionerTests: XCTestCase {
             let status = provisioner.status(for: id, settings: moved)
             XCTAssertFalse(status.installed, "\(id.displayName) should require the current local API URL")
             XCTAssertTrue(status.canInstall, "\(id.displayName) should remain installable")
+            XCTAssertTrue(status.needsUpdate, "\(id.displayName) should be marked as updateable")
+            XCTAssertEqual(status.actionTitle, "Update")
         }
 
         XCTAssertTrue(provisioner.status(for: .opencode, settings: moved).detail.contains("different local URL"))
@@ -286,6 +288,8 @@ final class AgentProvisionerTests: XCTestCase {
             let status = provisioner.status(for: id, settings: settings)
             XCTAssertFalse(status.installed, "\(id.displayName) should require current model limits")
             XCTAssertTrue(status.detail.contains("update"), "\(id.displayName) should explain stale metadata")
+            XCTAssertTrue(status.needsUpdate, "\(id.displayName) should be marked as updateable")
+            XCTAssertEqual(status.actionTitle, "Update")
 
             try provisioner.install(id, settings: settings)
             XCTAssertTrue(provisioner.status(for: id, settings: settings).installed)
@@ -322,10 +326,19 @@ final class AgentProvisionerTests: XCTestCase {
             let status = provisioner.status(for: id, settings: settings)
             XCTAssertFalse(status.installed, "\(id.displayName) should require complete provider metadata")
             XCTAssertTrue(status.detail.contains("update"), "\(id.displayName) should explain stale metadata")
+            XCTAssertTrue(status.needsUpdate, "\(id.displayName) should be marked as updateable")
+            XCTAssertEqual(status.actionTitle, "Update")
 
             try provisioner.install(id, settings: settings)
             XCTAssertTrue(provisioner.status(for: id, settings: settings).installed)
         }
+    }
+
+    func testUnavailableIntegrationActionIsExplicit() {
+        let status = AgentIntegrationStatus(id: .cline, installed: false, configPath: nil, detail: "Extension state not found", canInstall: false)
+
+        XCTAssertFalse(status.needsUpdate)
+        XCTAssertEqual(status.actionTitle, "Unavailable")
     }
 
     private func temporaryHome() throws -> URL {

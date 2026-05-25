@@ -936,14 +936,14 @@ struct IntegrationRow: View {
                 Text(status.id.displayName)
                     .font(.body.weight(.semibold))
                 Spacer()
-                PillActionButton(status.installed ? "Installed" : "Install") {
+                PillActionButton(status.actionTitle) {
                     install()
                 }
                 .disabled(status.installed || !status.canInstall)
             }
             Text(status.detail)
                 .font(.callout)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(status.needsUpdate ? Color.orange : Color.secondary)
                 .lineLimit(2)
             if let path = status.configPath {
                 Text(path)

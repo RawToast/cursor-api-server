@@ -269,6 +269,22 @@ public struct AgentIntegrationStatus: Equatable, Sendable, Identifiable {
     public var detail: String
     public var canInstall: Bool
 
+    public var needsUpdate: Bool {
+        !installed
+            && canInstall
+            && (detail == "Provider needs update" || detail == "Provider found with a different local URL")
+    }
+
+    public var actionTitle: String {
+        if installed {
+            return "Installed"
+        }
+        if !canInstall {
+            return "Unavailable"
+        }
+        return needsUpdate ? "Update" : "Install"
+    }
+
     public init(id: AgentIntegrationID, installed: Bool, configPath: String?, detail: String, canInstall: Bool = true) {
         self.id = id
         self.installed = installed

@@ -472,6 +472,9 @@ public final class AgentProvisioner: @unchecked Sendable {
         if text.contains(settings.baseURL.absoluteString) {
             return "Provider needs update"
         }
+        if text.contains("http://127.0.0.1:") || text.contains("http://localhost:") {
+            return "Provider found with a different local URL"
+        }
         if text.contains("cursorapi") || text.contains(CursorAPIBrand.displayName) || text.contains("CursorAPI") {
             return "Provider found with a different local URL"
         }
