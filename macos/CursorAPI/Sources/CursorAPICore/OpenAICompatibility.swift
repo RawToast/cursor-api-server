@@ -733,13 +733,13 @@ public enum OpenAICompatibility {
 
     private static func toOpenAIToolCalls(_ toolCalls: [CursorToolCall], tools: [OpenAIToolSpec], responseID: String) -> [[String: Any]] {
         toolCalls.enumerated().map { index, toolCall in
-            let name = resolveToolName(toolCall.name, tools: tools)
+            let resolved = resolveToolCall(toolCall, tools: tools)
             return [
                 "id": "call_\(responseID.replacingOccurrences(of: "[^A-Za-z0-9]", with: "", options: .regularExpression).suffix(18))_\(index)",
                 "type": "function",
                 "function": [
-                    "name": name,
-                    "arguments": jsonString(toolCall.arguments.mapValues(\.foundationValue))
+                    "name": resolved.name,
+                    "arguments": jsonString(resolved.arguments.mapValues(\.foundationValue))
                 ]
             ]
         }
@@ -752,22 +752,258 @@ public enum OpenAICompatibility {
     }
 
     private static func responseToolCallItem(_ toolCall: CursorToolCall, prepared: PreparedChatRequest, responseID: String, index: Int) -> [String: Any] {
-        let name = resolveToolName(toolCall.name, tools: prepared.tools)
+        let resolved = resolveToolCall(toolCall, tools: prepared.tools)
         let suffix = responseID.replacingOccurrences(of: "[^A-Za-z0-9]", with: "", options: .regularExpression).suffix(18)
         return [
             "id": "fc_\(suffix)_\(index)",
             "type": "function_call",
             "call_id": "call_\(suffix)_\(index)",
-            "name": name,
-            "arguments": jsonString(toolCall.arguments.mapValues(\.foundationValue)),
+            "name": resolved.name,
+            "arguments": jsonString(resolved.arguments.mapValues(\.foundationValue)),
             "status": "completed"
         ]
     }
 
-    private static func resolveToolName(_ name: String, tools: [OpenAIToolSpec]) -> String {
-        if tools.contains(where: { $0.name == name }) { return name }
-        let lower = name.lowercased()
-        return tools.first { $0.name.lowercased() == lower }?.name ?? name
+    private struct ResolvedToolCall {
+        var name: String
+        var arguments: [String: JSONValue]
+    }
+
+    private static func resolveToolCall(_ toolCall: CursorToolCall, tools: [OpenAIToolSpec]) -> ResolvedToolCall {
+        guard let tool = resolveToolSpec(toolCall.name, tools: tools) else {
+            return ResolvedToolCall(name: toolCall.name, arguments: toolCall.arguments)
+        }
+        return ResolvedToolCall(
+            name: tool.name,
+            arguments: normalizeArguments(toolCall.arguments, sdkToolName: toolCall.name, tool: tool)
+        )
+    }
+
+    private static func resolveToolSpec(_ name: String, tools: [OpenAIToolSpec]) -> OpenAIToolSpec? {
+        if let exact = tools.first(where: { $0.name == name }) { return exact }
+        let normalized = normalizedName(name)
+        if let caseInsensitive = tools.first(where: { normalizedName($0.name) == normalized }) {
+            return caseInsensitive
+        }
+
+        let aliases = Set(toolAliases(for: name).map(normalizedName))
+        if let aliased = tools.first(where: { aliases.contains(normalizedName($0.name)) }) {
+            return aliased
+        }
+
+        return tools.first { schemaLooksCompatible(sdkToolName: name, tool: $0) }
+    }
+
+    private static func normalizeArguments(
+        _ arguments: [String: JSONValue],
+        sdkToolName: String,
+        tool: OpenAIToolSpec
+    ) -> [String: JSONValue] {
+        let properties = parameterPropertyNames(tool)
+        let selectedTool = normalizedName(tool.name)
+        let canonical = canonicalToolName(sdkToolName)
+
+        if selectedTool == "strreplaceeditor", canonical == "write" {
+            return strReplaceEditorArguments(arguments, properties: properties)
+        }
+
+        guard !properties.isEmpty else { return arguments }
+
+        var output: [String: JSONValue] = [:]
+        var consumed = Set<String>()
+
+        func copy(_ source: String, as candidates: [String]) {
+            guard let value = arguments[source] else { return }
+            guard let target = propertyName(matching: [source] + candidates, in: properties) else {
+                consumed.insert(source)
+                return
+            }
+            output[target] = value
+            consumed.insert(source)
+        }
+
+        switch canonical {
+        case "shell":
+            copy("command", as: ["cmd", "script", "input"])
+            copy("workingDirectory", as: ["cwd", "workdir", "working_directory", "directory"])
+            copy("timeout", as: ["timeoutMs", "timeout_ms", "timeoutSeconds", "timeout_seconds"])
+        case "write":
+            copy("path", as: pathPropertyAliases())
+            copy("fileText", as: ["file_text", "content", "contents", "text", "fileContent", "file_content"])
+            copy("returnFileContentAfterWrite", as: ["returnFileContent", "return_file_content", "return_file_content_after_write"])
+        case "read", "delete":
+            copy("path", as: pathPropertyAliases())
+            copy("offset", as: ["start", "startLine", "start_line"])
+            copy("limit", as: ["maxLines", "max_lines", "lineCount", "line_count"])
+            copy("includeLineNumbers", as: ["include_line_numbers", "lineNumbers", "line_numbers"])
+        case "grep":
+            copy("pattern", as: ["query", "regex", "search"])
+            copy("path", as: pathPropertyAliases() + ["directory"])
+            copy("glob", as: ["include", "includeGlob", "include_glob"])
+            copy("outputMode", as: ["output_mode", "mode"])
+            copy("contextBefore", as: ["context_before", "beforeContext", "before_context"])
+            copy("contextAfter", as: ["context_after", "afterContext", "after_context"])
+            copy("context", as: ["contextLines", "context_lines"])
+            copy("caseInsensitive", as: ["case_insensitive", "ignoreCase", "ignore_case"])
+            copy("headLimit", as: ["head_limit", "limit", "maxResults", "max_results"])
+            copy("multiline", as: ["multiLine", "multi_line"])
+            copy("sort", as: ["sortBy", "sort_by"])
+            copy("sortAscending", as: ["sort_ascending", "ascending"])
+            copy("offset", as: ["start", "startLine", "start_line"])
+        case "glob":
+            copy("targetDirectory", as: ["target_directory", "directory", "cwd", "path"])
+            copy("globPattern", as: ["glob_pattern", "pattern", "glob"])
+        case "ls":
+            copy("path", as: pathPropertyAliases() + ["directory", "dir"])
+            copy("ignore", as: ["ignorePatterns", "ignore_patterns", "exclude"])
+        case "readlints":
+            copy("paths", as: ["files", "filePaths", "file_paths"])
+        case "mcp":
+            copy("providerIdentifier", as: ["provider", "server", "serverName", "server_name"])
+            copy("toolName", as: ["tool", "name", "tool_name"])
+        case "semsearch":
+            copy("query", as: ["pattern", "search"])
+            copy("targetDirectories", as: ["target_directories", "directories", "paths"])
+            copy("explanation", as: ["reason", "why"])
+        default:
+            break
+        }
+
+        for (key, value) in arguments where !consumed.contains(key) {
+            if let target = propertyName(matching: [key], in: properties) {
+                output[target] = value
+            }
+        }
+
+        return output.isEmpty ? arguments : output
+    }
+
+    private static func strReplaceEditorArguments(_ arguments: [String: JSONValue], properties: [String]) -> [String: JSONValue] {
+        let fallbackProperties = properties.isEmpty ? ["command", "path", "file_text"] : properties
+        var output: [String: JSONValue] = [:]
+        if let commandKey = propertyName(matching: ["command"], in: fallbackProperties) {
+            output[commandKey] = .string("create")
+        }
+        if let path = arguments["path"],
+           let pathKey = propertyName(matching: pathPropertyAliases(), in: fallbackProperties) {
+            output[pathKey] = path
+        }
+        if let fileText = arguments["fileText"],
+           let contentKey = propertyName(matching: ["file_text", "fileText", "content", "contents", "text"], in: fallbackProperties) {
+            output[contentKey] = fileText
+        }
+        return output.isEmpty ? arguments : output
+    }
+
+    private static func schemaLooksCompatible(sdkToolName: String, tool: OpenAIToolSpec) -> Bool {
+        let properties = parameterPropertyNames(tool)
+        guard !properties.isEmpty else { return false }
+        func has(_ candidates: [String]) -> Bool {
+            propertyName(matching: candidates, in: properties) != nil
+        }
+        switch canonicalToolName(sdkToolName) {
+        case "shell":
+            return has(["command", "cmd", "script"])
+        case "write":
+            return has(pathPropertyAliases()) && has(["fileText", "file_text", "content", "contents", "text"])
+        case "read", "delete":
+            return has(pathPropertyAliases())
+        case "grep":
+            return has(["pattern", "query", "regex"])
+        case "glob":
+            return has(["globPattern", "glob_pattern", "pattern", "glob"])
+        case "ls":
+            return has(pathPropertyAliases() + ["directory", "dir"])
+        case "readlints":
+            return has(["paths", "files", "filePaths", "file_paths"])
+        case "mcp":
+            return has(["toolName", "tool_name", "tool", "name"])
+        case "semsearch":
+            return has(["query", "pattern", "search"])
+        default:
+            return false
+        }
+    }
+
+    private static func parameterPropertyNames(_ tool: OpenAIToolSpec) -> [String] {
+        guard case .object(let root)? = tool.parameters,
+              case .object(let properties)? = root["properties"] else {
+            return []
+        }
+        return Array(properties.keys)
+    }
+
+    private static func propertyName(matching candidates: [String], in properties: [String]) -> String? {
+        for candidate in candidates {
+            if properties.contains(candidate) {
+                return candidate
+            }
+        }
+        let normalizedCandidates = Set(candidates.map(normalizedName))
+        return properties.first { normalizedCandidates.contains(normalizedName($0)) }
+    }
+
+    private static func canonicalToolName(_ name: String) -> String {
+        let normalized = normalizedName(name)
+        switch normalized {
+        case "bash", "runshellcommand", "runterminalcommand", "terminal", "execute", "executecommand", "runcommand", "run":
+            return "shell"
+        case "writefile", "createfile", "editfile", "replacefile", "strreplaceeditor":
+            return "write"
+        case "readfile", "openfile", "viewfile":
+            return "read"
+        case "deletefile", "removefile":
+            return "delete"
+        case "search", "searchfiles", "searchfilesystem", "ripgrep", "rg":
+            return "grep"
+        case "globfiles", "findfiles":
+            return "glob"
+        case "list", "listfiles", "listdirectory", "listdir":
+            return "ls"
+        case "readlints", "diagnostics", "getdiagnostics":
+            return "readlints"
+        case "semanticsearch", "semsearch", "searchcode":
+            return "semsearch"
+        case "callmcptool":
+            return "mcp"
+        default:
+            return normalized
+        }
+    }
+
+    private static func toolAliases(for name: String) -> [String] {
+        switch canonicalToolName(name) {
+        case "shell":
+            return ["shell", "bash", "run_shell_command", "run_terminal_command", "terminal", "execute", "execute_command", "run_command", "run"]
+        case "write":
+            return ["write", "write_file", "create_file", "edit_file", "replace_file", "str_replace_editor"]
+        case "read":
+            return ["read", "read_file", "open_file", "view_file"]
+        case "delete":
+            return ["delete", "delete_file", "remove_file"]
+        case "grep":
+            return ["grep", "search", "search_files", "search_filesystem", "ripgrep", "rg"]
+        case "glob":
+            return ["glob", "glob_files", "find_files"]
+        case "ls":
+            return ["ls", "list", "list_files", "list_directory", "list_dir"]
+        case "readlints":
+            return ["read_lints", "readLints", "diagnostics", "get_diagnostics"]
+        case "mcp":
+            return ["mcp", "call_mcp_tool"]
+        case "semsearch":
+            return ["sem_search", "semantic_search", "search_code"]
+        default:
+            return [name]
+        }
+    }
+
+    private static func pathPropertyAliases() -> [String] {
+        ["path", "file_path", "filePath", "filename", "file"]
+    }
+
+    private static func normalizedName(_ value: String) -> String {
+        value.lowercased().replacingOccurrences(of: "[^a-z0-9]", with: "", options: .regularExpression)
     }
 
     private static func usage(promptCharacters: Int, completionCharacters: Int) -> [String: Any] {
