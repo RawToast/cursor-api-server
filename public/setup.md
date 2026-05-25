@@ -205,6 +205,30 @@ To use it, point your provider at `/opencode/v1` and choose `cursor/composer-2.5
 
 :::
 
+## Native macOS app
+
+CursorAPI also has a native macOS app for a fully local LM Studio-style setup.
+The app listens on loopback, exposes `/v1/models`, `/v1/chat/completions`, and
+`/v1/responses`, and does the SDK-compatible HTTP/2 transport itself instead of
+calling the hosted Cloudflare API.
+
+The app stores the Cursor API key in macOS Keychain and writes `cursor-local`
+placeholders into agent configs, so OpenCode, Codex, VS Code, Cline, Kilo Code,
+and pi do not need a real Cursor key written to disk.
+
+For a double-clickable team build, package the app with local SDK transport
+defaults in the packager environment:
+
+```bash
+CURSOR_BACKEND_BASE_URL="..." \
+CURSOR_LOCAL_AGENT_ENDPOINT="..." \
+CURSOR_SDK_CLIENT_VERSION="sdk-1.0.13" \
+macos/CursorAPI/Scripts/package-app.sh
+```
+
+Those private transport values are embedded only into the generated `.app`
+bundle and are not committed to source control.
+
 ## cURL
 
 ```bash
