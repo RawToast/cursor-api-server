@@ -317,6 +317,10 @@ struct CursorLogo: View {
 struct APIKeyRequiredPanel: View {
     @ObservedObject var model: CursorAPIAppModel
 
+    private var canSaveKey: Bool {
+        !model.settings.cursorAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
@@ -334,10 +338,10 @@ struct APIKeyRequiredPanel: View {
             HStack(spacing: 10) {
                 SecureField("crsr_...", text: $model.settings.cursorAPIKey)
                     .textFieldStyle(.roundedBorder)
-                PillActionButton("Save & Start") {
-                    model.startServer()
+                PillActionButton(model.sdkConfigured ? "Save & Start" : "Save Key") {
+                    model.saveKeyAndStartIfReady()
                 }
-                .disabled(!model.canStartServer)
+                .disabled(!canSaveKey)
             }
         }
         .padding(12)
@@ -440,6 +444,103 @@ struct ConnectionPage: View {
             Text(model.statusText)
                 .font(.callout)
                 .foregroundStyle(.secondary)
+
+            if model.hasCursorAPIKey && !model.needsKeychainPermission {
+                SDKConnectivityPanel(model: model)
+            }
+        }
+    }
+}
+
+struct SDKConnectivityPanel: View {
+    @ObservedObject var model: CursorAPIAppModel
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 10) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(tone.opacity(0.12))
+                if model.isCheckingSDK {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Image(systemName: iconName)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(tone)
+                }
+            }
+            .frame(width: 24, height: 24)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.callout.weight(.semibold))
+                Text(detail)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+
+            Spacer()
+
+            PillActionButton(model.isCheckingSDK ? "Checking" : "Check SDK") {
+                model.checkSDKConnectivity()
+            }
+            .disabled(!model.canCheckSDK)
+        }
+        .padding(12)
+        .background(AppTheme.controlBackground)
+        .overlay {
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(AppTheme.separator, lineWidth: 0.5)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var title: String {
+        if model.isCheckingSDK {
+            return "Checking SDK"
+        }
+        switch model.sdkCheckState {
+        case .idle:
+            return model.sdkConfigured ? "SDK Ready to Check" : "SDK Setup Needed"
+        case .success:
+            return "SDK Check Passed"
+        case .failure:
+            return "SDK Check Failed"
+        }
+    }
+
+    private var detail: String {
+        if model.isCheckingSDK {
+            return "Testing key exchange and HTTP/2 transport."
+        }
+        switch model.sdkCheckState {
+        case .idle:
+            return model.sdkConfigured ? "Ready to verify Composer through the local harness." : "Configure Advanced Transport before checking."
+        case .success(let message), .failure(let message):
+            return message
+        }
+    }
+
+    private var iconName: String {
+        switch model.sdkCheckState {
+        case .success:
+            return "checkmark.circle.fill"
+        case .failure:
+            return "exclamationmark.triangle.fill"
+        case .idle:
+            return model.sdkConfigured ? "network" : "network.slash"
+        }
+    }
+
+    private var tone: Color {
+        switch model.sdkCheckState {
+        case .success:
+            return .green
+        case .failure:
+            return .orange
+        case .idle:
+            return model.sdkConfigured ? .blue : .orange
         }
     }
 }

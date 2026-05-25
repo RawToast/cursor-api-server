@@ -216,6 +216,10 @@ The app stores the Cursor API key in macOS Keychain and writes `cursor-local`
 placeholders into agent configs, so OpenCode, Codex, VS Code, Cline, Kilo Code,
 and pi do not need a real Cursor key written to disk.
 
+The local API stays stopped until both the Cursor API key and SDK transport are
+configured. Once configured, use the app's Check SDK action to verify key
+exchange and HTTP/2 transport before pointing coding agents at it.
+
 For a double-clickable team build, package the app with local SDK transport
 defaults in the packager environment:
 

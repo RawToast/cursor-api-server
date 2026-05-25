@@ -165,9 +165,10 @@ Its `/v1/responses` endpoint is stateful in-process: `previous_response_id`
 continues the same SDK agent session, while per-project headers or Responses
 metadata keep concurrent projects on separate SDK sessions.
 
-The local listener stays stopped until a Cursor API key is entered in the app UI.
-The key is stored in the macOS Keychain; generated agent configs use
-`cursor-local` placeholders instead of writing the real key to disk.
+The local listener stays stopped until a Cursor API key and SDK transport are
+configured in the app UI. The key is stored in the macOS Keychain; generated
+agent configs use `cursor-local` placeholders instead of writing the real key to
+disk.
 
 Build it with:
 

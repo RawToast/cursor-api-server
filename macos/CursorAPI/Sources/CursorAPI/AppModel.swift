@@ -11,14 +11,23 @@ final class CursorAPIAppModel: ObservableObject {
     @Published var integrations: [AgentIntegrationStatus] = []
     @Published var lastError: String?
     @Published var needsKeychainPermission = false
+    @Published var sdkCheckState: SDKCheckState = .idle
+    @Published var isCheckingSDK = false
 
     private let store = AppSettingsStore()
     private let provisioner = AgentProvisioner()
+    private let connectivityCheck = CursorSDKConnectivityCheck()
     private lazy var server = LocalAPIServer(settingsProvider: { [weak self] in
         DispatchQueue.main.sync {
             self?.settings ?? CursorAPISettings()
         }
     })
+
+    enum SDKCheckState: Equatable {
+        case idle
+        case success(String)
+        case failure(String)
+    }
 
     init() {
         var loaded = store.load()
@@ -37,7 +46,7 @@ final class CursorAPIAppModel: ObservableObject {
     }
 
     var canStartServer: Bool {
-        hasCursorAPIKey
+        hasCursorAPIKey && sdkConfigured
     }
 
     var sdkConfigured: Bool {
@@ -54,10 +63,20 @@ final class CursorAPIAppModel: ObservableObject {
         return "Ready"
     }
 
+    var canCheckSDK: Bool {
+        hasCursorAPIKey && sdkConfigured && !isCheckingSDK
+    }
+
     func startServer(allowKeychainPrompt: Bool = true) {
-        guard canStartServer else {
+        guard hasCursorAPIKey else {
             isRunning = false
             statusText = "Enter a Cursor API key to start the local API"
+            lastError = nil
+            return
+        }
+        guard sdkConfigured else {
+            isRunning = false
+            statusText = "Configure SDK transport to use Composer"
             lastError = nil
             return
         }
@@ -97,11 +116,18 @@ final class CursorAPIAppModel: ObservableObject {
     func restartServer() {
         guard canStartServer else {
             stopServer()
-            statusText = "Enter a Cursor API key to start the local API"
+            updateStatusText()
             return
         }
         stopServer()
         startServer()
+    }
+
+    func saveKeyAndStartIfReady() {
+        saveSettings()
+        if canStartServer {
+            startServer()
+        }
     }
 
     func saveSettings() {
@@ -109,9 +135,10 @@ final class CursorAPIAppModel: ObservableObject {
         if settings.hasInlineCursorAPIKey {
             settings.keychainCursorAPIKeyAvailable = true
         }
+        sdkCheckState = .idle
         let launchAtLoginError = applyLaunchAtLogin()
         refreshIntegrations()
-        if !hasCursorAPIKey {
+        if !hasCursorAPIKey || !sdkConfigured {
             stopServer()
         } else if isRunning {
             restartServer()
@@ -127,7 +154,7 @@ final class CursorAPIAppModel: ObservableObject {
         if settings.hasInlineCursorAPIKey {
             needsKeychainPermission = false
         }
-        if !hasCursorAPIKey, isRunning {
+        if !canStartServer, isRunning {
             stopServer()
         } else if !isRunning {
             updateStatusText()
@@ -150,6 +177,34 @@ final class CursorAPIAppModel: ObservableObject {
 
     func dismissError() {
         lastError = nil
+    }
+
+    func checkSDKConnectivity() {
+        guard canCheckSDK else {
+            sdkCheckState = .failure(sdkConfigured ? "Enter a Cursor API key before checking SDK connectivity." : "Configure SDK transport before checking connectivity.")
+            return
+        }
+        isCheckingSDK = true
+        sdkCheckState = .idle
+        Task {
+            do {
+                let resolved = try store.resolvingCursorAPIKey(in: settings, allowUserPrompt: true)
+                settings = resolved
+                store.save(settings)
+                settings.keychainCursorAPIKeyAvailable = true
+                needsKeychainPermission = false
+                _ = try await connectivityCheck.run(settings: resolved)
+                sdkCheckState = .success("SDK transport responded.")
+                lastError = nil
+            } catch AppSettingsStoreError.keychainPermissionRequired {
+                needsKeychainPermission = true
+                sdkCheckState = .failure("Allow Keychain access, then run the check again.")
+            } catch {
+                sdkCheckState = .failure(error.localizedDescription)
+            }
+            isCheckingSDK = false
+            updateStatusText()
+        }
     }
 
     private func updateStatusText() {

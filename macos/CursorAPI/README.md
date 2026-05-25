@@ -2,7 +2,7 @@
 
 CursorAPI is a native macOS app that exposes a local OpenAI-compatible API for Cursor Composer models.
 
-After a Cursor API key is entered in the UI, the app listens on loopback only at `http://127.0.0.1:8787/v1` by default and provides:
+After a Cursor API key and SDK transport are configured, the app listens on loopback only at `http://127.0.0.1:8787/v1` by default and provides:
 
 - `GET /v1/models`
 - `POST /v1/chat/completions`
@@ -11,9 +11,13 @@ After a Cursor API key is entered in the UI, the app listens on loopback only at
 
 `GET /health` includes the local base URL and `sdkConfigured`, which is `true` only after the Cursor API key, backend origin, and SDK endpoint are configured.
 
-The local API listener does not start until a Cursor API key has been entered in the app. The key is stored in the macOS Keychain; generated agent configs use a `cursor-local` placeholder instead of writing the real key to disk.
+The local API listener does not start until a Cursor API key and SDK transport are configured in the app. The key is stored in the macOS Keychain; generated agent configs use a `cursor-local` placeholder instead of writing the real key to disk.
 
 Streaming Chat Completions and Responses requests are sent as live chunked SSE. The app uses its local SDK-compatible HTTP/2 harness internally and does not call the hosted Cloudflare API.
+
+The connection pane includes a Check SDK action that performs a small Composer
+request through the same key exchange and HTTP/2 harness used by normal API
+requests.
 
 Both Chat Completions `tool_calls` and Responses `function_call` outputs are supported for local coding-agent tool loops. Responses streams emit `response.function_call_arguments.delta` and `response.function_call_arguments.done` events when the SDK harness asks the client to run a local function tool.
 
