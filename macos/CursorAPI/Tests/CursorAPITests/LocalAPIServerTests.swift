@@ -188,8 +188,10 @@ final class LocalAPIServerTests: XCTestCase {
             XCTAssertEqual(endpoints["chat_completions"], "/v1/chat/completions", path)
             XCTAssertEqual(endpoints["responses"], "/v1/responses", path)
             XCTAssertEqual(endpoints["delete_response"], "DELETE /v1/responses/{response_id}", path)
+            XCTAssertEqual(endpoints["cancel_response"], "POST /v1/responses/{response_id}/cancel", path)
             XCTAssertEqual(features["stateful_responses"], true, path)
             XCTAssertEqual(features["response_deletion"], true, path)
+            XCTAssertEqual(features["response_cancellation"], false, path)
             XCTAssertEqual(features["tool_calls"], true, path)
             XCTAssertFalse(text.contains("crsr_test"), path)
             XCTAssertFalse(text.contains("exchange.example"), path)
@@ -769,6 +771,45 @@ final class LocalAPIServerTests: XCTestCase {
 
         var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/responses/resp_missing")!)
         request.httpMethod = "DELETE"
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let text = String(data: data, encoding: .utf8) ?? ""
+
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 404)
+        XCTAssertTrue(text.contains(#""code":"not_found""#) || text.contains(#""code" : "not_found""#))
+    }
+
+    func testResponsesCancelEndpointRejectsKnownSynchronousResponses() async throws {
+        let port = try unusedTCPPort()
+        let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness())
+        try server.start(port: port)
+        defer { server.stop() }
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        let created = try await postResponse(port: port, body: #"{"model":"composer-2.5","input":"hello"}"#)
+        let responseID = try XCTUnwrap(created["id"] as? String)
+
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/responses/\(responseID)/cancel")!)
+        request.httpMethod = "POST"
+        let (cancelData, cancelResponse) = try await URLSession.shared.data(for: request)
+        let cancelText = String(data: cancelData, encoding: .utf8) ?? ""
+        let (statusAfterCancel, retrievedAfterCancel) = try await getResponse(port: port, responseID: responseID)
+
+        XCTAssertEqual((cancelResponse as? HTTPURLResponse)?.statusCode, 400)
+        XCTAssertTrue(cancelText.contains("Only background responses can be cancelled"))
+        XCTAssertTrue(cancelText.contains(#""code":"invalid_request""#) || cancelText.contains(#""code" : "invalid_request""#))
+        XCTAssertEqual(statusAfterCancel, 200)
+        XCTAssertEqual(retrievedAfterCancel?["id"] as? String, responseID)
+    }
+
+    func testResponsesCancelUnknownResponseReturns404() async throws {
+        let port = try unusedTCPPort()
+        let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness())
+        try server.start(port: port)
+        defer { server.stop() }
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/responses/resp_missing/cancel")!)
+        request.httpMethod = "POST"
         let (data, response) = try await URLSession.shared.data(for: request)
         let text = String(data: data, encoding: .utf8) ?? ""
 

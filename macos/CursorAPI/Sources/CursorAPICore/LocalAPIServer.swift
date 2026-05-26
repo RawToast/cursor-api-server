@@ -238,6 +238,12 @@ public final class LocalAPIServer: @unchecked Sendable {
                 let listData = try paginatedInputItemsData(data, query: request.query)
                 return readResponse(withCORS(HTTPResponse.data(listData, contentType: "application/json; charset=utf-8")), method: method)
             }
+            if method == "POST", let responseID = responseCancelID(from: path) {
+                guard await responseSessions.knowsResponse(responseID: responseID) else {
+                    throw CursorAPIError.notFound
+                }
+                throw CursorAPIError.badRequest("Only background responses can be cancelled. \(CursorAPIBrand.displayName) runs local responses synchronously.")
+            }
             if method == "DELETE", let responseID = responseID(from: path) {
                 guard await responseSessions.deleteResponse(responseID: responseID) else {
                     throw CursorAPIError.notFound
@@ -631,6 +637,17 @@ public final class LocalAPIServer: @unchecked Sendable {
         return value
     }
 
+    private func responseCancelID(from path: String) -> String? {
+        let prefix = "/v1/responses/"
+        let suffix = "/cancel"
+        guard path.hasPrefix(prefix), path.hasSuffix(suffix) else { return nil }
+        let start = path.index(path.startIndex, offsetBy: prefix.count)
+        let end = path.index(path.endIndex, offsetBy: -suffix.count)
+        let value = String(path[start..<end]).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty, !value.contains("/") else { return nil }
+        return value
+    }
+
     private func paginatedInputItemsData(_ data: Data, query: String?) throws -> Data {
         guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let inputItems = root["data"] as? [[String: Any]] else {
@@ -704,6 +721,7 @@ public final class LocalAPIServer: @unchecked Sendable {
                 "chat_completions": "/v1/chat/completions",
                 "responses": "/v1/responses",
                 "delete_response": "DELETE /v1/responses/{response_id}",
+                "cancel_response": "POST /v1/responses/{response_id}/cancel",
                 "completions": "/v1/completions",
                 "health": "/health"
             ],
@@ -712,6 +730,7 @@ public final class LocalAPIServer: @unchecked Sendable {
                 "responses": true,
                 "stateful_responses": true,
                 "response_deletion": true,
+                "response_cancellation": false,
                 "streaming": true,
                 "tool_calls": true
             ]
