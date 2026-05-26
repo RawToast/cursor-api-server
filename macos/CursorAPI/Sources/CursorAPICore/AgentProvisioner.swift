@@ -230,7 +230,7 @@ public final class AgentProvisioner: @unchecked Sendable {
         let installed = continueConfigMatches(text, settings: settings)
         let detail = installed
             ? "Composer models installed"
-            : (text.contains(Self.continueBlockStart) ? "Provider found with a different local URL" : providerStatusDetail(text: text, settings: settings))
+            : continueProviderStatusDetail(text: text, settings: settings)
         return AgentIntegrationStatus(id: .continueDev, installed: installed, configPath: url.path, detail: detail)
     }
 
@@ -1067,6 +1067,9 @@ public final class AgentProvisioner: @unchecked Sendable {
         if text.contains(settings.baseURL.absoluteString) {
             return "Provider needs update"
         }
+        if containsHostedCursorAPIURL(text) {
+            return "Provider points at a hosted API"
+        }
         if text.contains("http://127.0.0.1:") || text.contains("http://localhost:") {
             return "Provider found with a different local URL"
         }
@@ -1074,6 +1077,20 @@ public final class AgentProvisioner: @unchecked Sendable {
             return "Provider found with a different local URL"
         }
         return "Ready to install"
+    }
+
+    private func continueProviderStatusDetail(text: String, settings: CursorAPISettings) -> String {
+        let detail = providerStatusDetail(text: text, settings: settings)
+        if detail != "Ready to install" {
+            return detail
+        }
+        return text.contains(Self.continueBlockStart) ? "Provider found with a different local URL" : detail
+    }
+
+    private func containsHostedCursorAPIURL(_ text: String) -> Bool {
+        text.contains("cursor-api.standardagents.ai")
+            || text.contains("/opencode/v1")
+            || text.contains("/opencodev2/v1")
     }
 
     private func stringValue(_ value: Any?) -> String? {

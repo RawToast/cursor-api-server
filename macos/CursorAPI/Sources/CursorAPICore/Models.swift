@@ -277,6 +277,12 @@ public enum AgentIntegrationID: String, CaseIterable, Codable, Sendable {
 }
 
 public struct AgentIntegrationStatus: Equatable, Sendable, Identifiable {
+    private static let updateableDetails = Set([
+        "Provider needs update",
+        "Provider found with a different local URL",
+        "Provider points at a hosted API"
+    ])
+
     public var id: AgentIntegrationID
     public var installed: Bool
     public var configPath: String?
@@ -286,7 +292,7 @@ public struct AgentIntegrationStatus: Equatable, Sendable, Identifiable {
     public var needsUpdate: Bool {
         !installed
             && canInstall
-            && (detail == "Provider needs update" || detail == "Provider found with a different local URL")
+            && Self.updateableDetails.contains(detail)
     }
 
     public var actionTitle: String {

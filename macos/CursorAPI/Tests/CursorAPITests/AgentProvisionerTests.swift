@@ -572,6 +572,29 @@ final class AgentProvisionerTests: XCTestCase {
         XCTAssertTrue(provisioner.status(for: .vscode, settings: moved).detail.contains("different local URL"))
     }
 
+    func testStatusesTreatHostedCursorAPIConfigsAsRemoteProvidersNeedingLocalUpdate() throws {
+        let home = try temporaryHome()
+        let provisioner = AgentProvisioner(homeDirectory: home)
+        let settings = CursorAPISettings(port: 8787)
+        let hostedBaseURL = "https://cursor-api.standardagents.ai/opencodev2/v1"
+
+        _ = try provisioner.installAll(settings: settings)
+        try replaceTextInGeneratedConfigs(under: home, matching: settings.baseURL.absoluteString, with: hostedBaseURL)
+
+        for status in provisioner.statuses(settings: settings) {
+            XCTAssertFalse(status.installed, "\(status.id.displayName) should not treat a hosted API config as local")
+            XCTAssertTrue(status.needsUpdate, "\(status.id.displayName) should be marked updateable")
+            XCTAssertEqual(status.actionTitle, "Update")
+            XCTAssertEqual(status.detail, "Provider points at a hosted API", "\(status.id.displayName) should explain the remote endpoint")
+        }
+
+        _ = try provisioner.installAll(settings: settings)
+        let generatedText = try activeGeneratedConfigText(under: home)
+        XCTAssertTrue(provisioner.statuses(settings: settings).allSatisfy(\.installed))
+        XCTAssertFalse(generatedText.contains(hostedBaseURL))
+        XCTAssertTrue(generatedText.contains(settings.baseURL.absoluteString))
+    }
+
     func testStatusesRequireCurrentModelMetadata() throws {
         let home = try temporaryHome()
         let provisioner = AgentProvisioner(homeDirectory: home)
@@ -666,9 +689,20 @@ final class AgentProvisionerTests: XCTestCase {
     }
 
     private func allGeneratedConfigText(under home: URL) throws -> String {
+        try generatedConfigText(under: home, includeBackups: true)
+    }
+
+    private func activeGeneratedConfigText(under home: URL) throws -> String {
+        try generatedConfigText(under: home, includeBackups: false)
+    }
+
+    private func generatedConfigText(under home: URL, includeBackups: Bool) throws -> String {
         let enumerator = try XCTUnwrap(FileManager.default.enumerator(at: home, includingPropertiesForKeys: nil))
         var chunks: [String] = []
         for case let url as URL in enumerator where !url.hasDirectoryPath {
+            if !includeBackups, url.lastPathComponent.contains(".api-for-cursor-backup.") {
+                continue
+            }
             chunks.append(try String(contentsOf: url, encoding: .utf8))
         }
         return chunks.joined(separator: "\n")
@@ -677,6 +711,13 @@ final class AgentProvisionerTests: XCTestCase {
     private func replaceText(in url: URL, matching oldValue: String, with newValue: String) throws {
         let text = try String(contentsOf: url, encoding: .utf8)
         try text.replacingOccurrences(of: oldValue, with: newValue).write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    private func replaceTextInGeneratedConfigs(under home: URL, matching oldValue: String, with newValue: String) throws {
+        let enumerator = try XCTUnwrap(FileManager.default.enumerator(at: home, includingPropertiesForKeys: nil))
+        for case let url as URL in enumerator where !url.hasDirectoryPath {
+            try replaceText(in: url, matching: oldValue, with: newValue)
+        }
     }
 
     private func assertComposerMetadata(
