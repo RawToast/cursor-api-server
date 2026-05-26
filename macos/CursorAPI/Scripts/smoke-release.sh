@@ -5,12 +5,13 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_PATH="$ROOT_DIR/dist/API for Cursor.app"
 TIMEOUT_SECONDS=45
 RUN_PACKAGE=0
+PACKAGE_MODE="--release"
 RUN_TESTS=1
 REQUIRE_LIVE=0
 
 usage() {
   cat <<USAGE
-Usage: $0 [--app PATH] [--timeout SECONDS] [--package] [--skip-tests] [--require-live]
+Usage: $0 [--app PATH] [--timeout SECONDS] [--package] [--development-package] [--skip-tests] [--require-live]
 
 Run the release-quality verification gate for the packaged macOS app. The gate
 is intentionally sequential because the provider smoke tests launch and quit the
@@ -18,7 +19,9 @@ same app bundle.
 
   --app PATH       App bundle to verify. Defaults to dist/API for Cursor.app.
   --timeout N      Seconds for each app/provider smoke. Default: 45.
-  --package        Rebuild the development app bundle before verification.
+  --package        Rebuild the release app bundle before verification.
+  --development-package
+                   Rebuild a development app bundle before verification.
   --skip-tests     Skip swift test.
   --require-live   Fail unless CURSOR_API_TEST_KEY is set and live routing passes.
 
@@ -41,6 +44,11 @@ while [ "$#" -gt 0 ]; do
       ;;
     --package)
       RUN_PACKAGE=1
+      PACKAGE_MODE="--release"
+      ;;
+    --development-package)
+      RUN_PACKAGE=1
+      PACKAGE_MODE="--development"
       ;;
     --skip-tests)
       RUN_TESTS=0
@@ -107,7 +115,7 @@ run_app_step() {
 trap stop_app EXIT
 
 if [ "$RUN_PACKAGE" -eq 1 ]; then
-  run_step "Package app" 240 "$ROOT_DIR/Scripts/package-app.sh" --development
+  run_step "Package app" 240 "$ROOT_DIR/Scripts/package-app.sh" "$PACKAGE_MODE"
 fi
 
 if [ "$RUN_TESTS" -eq 1 ]; then
