@@ -17,10 +17,14 @@ public enum AppSettingsStoreError: Error, LocalizedError, Equatable {
 }
 
 public final class AppSettingsStore: @unchecked Sendable {
+    public static let defaultKeychainService = "ai.standardagents.apiforcursor"
+    public static let legacyKeychainService = "ai.standardagents.cursorapi"
+
     private let defaults: UserDefaults
     private let environment: [String: String]
     private let bundledTransportDefaults: @Sendable () -> [String: String]
     private let keychainService: String
+    private let legacyKeychainServices: [String]
     private let keychainAccount: String
     private let key = "CursorAPI.settings.v1"
     private let queue = DispatchQueue(label: "CursorAPI.AppSettingsStore")
@@ -29,13 +33,15 @@ public final class AppSettingsStore: @unchecked Sendable {
         defaults: UserDefaults = .standard,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         bundledTransportDefaults: @escaping @Sendable () -> [String: String] = AppSettingsStore.loadBundledTransportDefaults,
-        keychainService: String = "ai.standardagents.cursorapi",
+        keychainService: String = AppSettingsStore.defaultKeychainService,
+        legacyKeychainServices: [String] = [AppSettingsStore.legacyKeychainService],
         keychainAccount: String = "cursor-api-key"
     ) {
         self.defaults = defaults
         self.environment = environment
         self.bundledTransportDefaults = bundledTransportDefaults
         self.keychainService = keychainService
+        self.legacyKeychainServices = legacyKeychainServices
         self.keychainAccount = keychainAccount
     }
 
@@ -151,37 +157,52 @@ public final class AppSettingsStore: @unchecked Sendable {
     }
 
     private func keychainAPIKeyExists() -> Bool {
-        var query = keychainQuery()
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-        query[kSecUseAuthenticationContext as String] = keychainContext(allowUserPrompt: false)
-        let status = SecItemCopyMatching(query as CFDictionary, nil)
-        return status == errSecSuccess || status == errSecInteractionNotAllowed
+        for service in keychainLookupServices {
+            var query = keychainQuery(service: service)
+            query[kSecMatchLimit as String] = kSecMatchLimitOne
+            query[kSecUseAuthenticationContext as String] = keychainContext(allowUserPrompt: false)
+            let status = SecItemCopyMatching(query as CFDictionary, nil)
+            if status == errSecSuccess || status == errSecInteractionNotAllowed {
+                return true
+            }
+        }
+        return false
     }
 
     private func readKeychainAPIKey(allowUserPrompt: Bool) throws -> String {
-        var query = keychainQuery()
-        query[kSecReturnData as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-        query[kSecUseAuthenticationContext as String] = keychainContext(allowUserPrompt: allowUserPrompt)
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        if status == errSecInteractionNotAllowed {
-            throw AppSettingsStoreError.keychainPermissionRequired
+        for service in keychainLookupServices {
+            var query = keychainQuery(service: service)
+            query[kSecReturnData as String] = true
+            query[kSecMatchLimit as String] = kSecMatchLimitOne
+            query[kSecUseAuthenticationContext as String] = keychainContext(allowUserPrompt: allowUserPrompt)
+            var result: CFTypeRef?
+            let status = SecItemCopyMatching(query as CFDictionary, &result)
+            if status == errSecInteractionNotAllowed {
+                throw AppSettingsStoreError.keychainPermissionRequired
+            }
+            if !allowUserPrompt, status != errSecSuccess, status != errSecItemNotFound {
+                throw AppSettingsStoreError.keychainPermissionRequired
+            }
+            guard status != errSecItemNotFound else {
+                continue
+            }
+            guard status == errSecSuccess, let data = result as? Data, let value = String(data: data, encoding: .utf8), !value.isEmpty else {
+                throw AppSettingsStoreError.missingCursorAPIKey
+            }
+            if service != keychainService {
+                saveKeychainAPIKey(value)
+                deleteKeychainAPIKey(service: service)
+            }
+            return value
         }
-        if !allowUserPrompt, status != errSecSuccess, status != errSecItemNotFound {
-            throw AppSettingsStoreError.keychainPermissionRequired
-        }
-        guard status == errSecSuccess, let data = result as? Data, let value = String(data: data, encoding: .utf8), !value.isEmpty else {
-            throw AppSettingsStoreError.missingCursorAPIKey
-        }
-        return value
+        throw AppSettingsStoreError.missingCursorAPIKey
     }
 
     private func saveKeychainAPIKey(_ value: String) {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        var query = keychainQuery()
+        var query = keychainQuery(service: keychainService)
         if trimmed.isEmpty {
-            SecItemDelete(query as CFDictionary)
+            deleteKeychainAPIKey()
             return
         }
         let data = Data(trimmed.utf8)
@@ -192,10 +213,19 @@ public final class AppSettingsStore: @unchecked Sendable {
             query[kSecValueData as String] = data
             SecItemAdd(query as CFDictionary, nil)
         }
+        for service in legacyKeychainServices where service != keychainService {
+            deleteKeychainAPIKey(service: service)
+        }
     }
 
     private func deleteKeychainAPIKey() {
-        SecItemDelete(keychainQuery() as CFDictionary)
+        for service in keychainLookupServices {
+            deleteKeychainAPIKey(service: service)
+        }
+    }
+
+    private func deleteKeychainAPIKey(service: String) {
+        SecItemDelete(keychainQuery(service: service) as CFDictionary)
     }
 
     private func keychainContext(allowUserPrompt: Bool) -> LAContext {
@@ -204,10 +234,21 @@ public final class AppSettingsStore: @unchecked Sendable {
         return context
     }
 
-    private func keychainQuery() -> [String: Any] {
+    private var keychainLookupServices: [String] {
+        var services: [String] = []
+        for service in [keychainService] + legacyKeychainServices {
+            let trimmed = service.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty, !services.contains(trimmed) {
+                services.append(trimmed)
+            }
+        }
+        return services
+    }
+
+    private func keychainQuery(service: String) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
+            kSecAttrService as String: service,
             kSecAttrAccount as String: keychainAccount
         ]
     }

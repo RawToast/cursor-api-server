@@ -134,6 +134,7 @@ final class SettingsTests: XCTestCase {
             ],
             bundledTransportDefaults: { [:] },
             keychainService: "CursorAPI.SettingsTests.\(UUID().uuidString)",
+            legacyKeychainServices: [],
             keychainAccount: "cursor-api-key"
         )
 
@@ -141,6 +142,93 @@ final class SettingsTests: XCTestCase {
 
         XCTAssertEqual(settings.cursorAPIKey, "")
         XCTAssertFalse(settings.hasCursorAPIKey)
+    }
+
+    func testSavedAPIKeyUsesRenamedKeychainService() throws {
+        let defaults = isolatedDefaults()
+        let keychainService = "ai.standardagents.apiforcursor.SettingsTests.\(UUID().uuidString)"
+        let legacyKeychainService = "ai.standardagents.cursorapi.SettingsTests.\(UUID().uuidString)"
+        let account = "cursor-api-key-\(UUID().uuidString)"
+        let store = AppSettingsStore(
+            defaults: defaults,
+            environment: [:],
+            bundledTransportDefaults: { [:] },
+            keychainService: keychainService,
+            legacyKeychainServices: [legacyKeychainService],
+            keychainAccount: account
+        )
+        defer { store.save(CursorAPISettings(cursorAPIKey: "", keychainCursorAPIKeyAvailable: false)) }
+
+        store.save(CursorAPISettings(cursorAPIKey: " crsr_saved "))
+
+        let settings = store.load()
+        XCTAssertEqual(settings.cursorAPIKey, "")
+        XCTAssertTrue(settings.hasCursorAPIKey)
+
+        let resolved = try store.resolvingCursorAPIKey(in: settings, allowUserPrompt: false)
+        XCTAssertEqual(resolved.cursorAPIKey, "crsr_saved")
+
+        let primaryOnlyStore = AppSettingsStore(
+            defaults: isolatedDefaults(),
+            environment: [:],
+            bundledTransportDefaults: { [:] },
+            keychainService: keychainService,
+            legacyKeychainServices: [],
+            keychainAccount: account
+        )
+        XCTAssertTrue(primaryOnlyStore.load().hasCursorAPIKey)
+
+        let legacyOnlyStore = AppSettingsStore(
+            defaults: isolatedDefaults(),
+            environment: [:],
+            bundledTransportDefaults: { [:] },
+            keychainService: legacyKeychainService,
+            legacyKeychainServices: [],
+            keychainAccount: account
+        )
+        XCTAssertFalse(legacyOnlyStore.load().hasCursorAPIKey)
+    }
+
+    func testLegacyKeychainServiceMigratesToRenamedService() throws {
+        let keychainService = "ai.standardagents.apiforcursor.SettingsTests.\(UUID().uuidString)"
+        let legacyKeychainService = "ai.standardagents.cursorapi.SettingsTests.\(UUID().uuidString)"
+        let account = "cursor-api-key-\(UUID().uuidString)"
+        let legacyStore = AppSettingsStore(
+            defaults: isolatedDefaults(),
+            environment: [:],
+            bundledTransportDefaults: { [:] },
+            keychainService: legacyKeychainService,
+            legacyKeychainServices: [],
+            keychainAccount: account
+        )
+        let store = AppSettingsStore(
+            defaults: isolatedDefaults(),
+            environment: [:],
+            bundledTransportDefaults: { [:] },
+            keychainService: keychainService,
+            legacyKeychainServices: [legacyKeychainService],
+            keychainAccount: account
+        )
+        defer { store.save(CursorAPISettings(cursorAPIKey: "", keychainCursorAPIKeyAvailable: false)) }
+
+        legacyStore.save(CursorAPISettings(cursorAPIKey: "crsr_legacy"))
+
+        let settings = store.load()
+        XCTAssertTrue(settings.hasCursorAPIKey)
+
+        let resolved = try store.resolvingCursorAPIKey(in: settings, allowUserPrompt: false)
+        XCTAssertEqual(resolved.cursorAPIKey, "crsr_legacy")
+
+        let primaryOnlyStore = AppSettingsStore(
+            defaults: isolatedDefaults(),
+            environment: [:],
+            bundledTransportDefaults: { [:] },
+            keychainService: keychainService,
+            legacyKeychainServices: [],
+            keychainAccount: account
+        )
+        XCTAssertTrue(primaryOnlyStore.load().hasCursorAPIKey)
+        XCTAssertFalse(legacyStore.load().hasCursorAPIKey)
     }
 
     func testSavedTransportSettingsOverrideBundledDefaults() throws {
