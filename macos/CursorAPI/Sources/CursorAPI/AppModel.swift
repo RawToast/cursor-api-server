@@ -77,7 +77,7 @@ final class CursorAPIAppModel: ObservableObject {
     }
 
     var canInstallAllIntegrations: Bool {
-        pendingIntegrationInstallCount > 0
+        pendingIntegrationInstallCount > 0 && canPrepareAgentConfigs
     }
 
     var installAllIntegrationsTitle: String {
@@ -85,7 +85,28 @@ final class CursorAPIAppModel: ObservableObject {
         if pending.isEmpty {
             return "Installed"
         }
-        return pending.contains(where: \.needsUpdate) ? "Update All" : "Install All"
+        let action = pending.contains(where: \.needsUpdate) ? "Update All" : "Install All"
+        return isRunning && !needsKeychainPermission ? action : "Start & \(action)"
+    }
+
+    var canPrepareAgentConfigs: Bool {
+        hasCursorAPIKey && sdkConfigured
+    }
+
+    var agentSetupNoticeText: String? {
+        if !hasCursorAPIKey {
+            return "Save a Cursor API key before installing agent configs."
+        }
+        if !sdkConfigured {
+            return "This build is missing bundled Composer transport, so agent setup is disabled."
+        }
+        if needsKeychainPermission {
+            return "Installing configs will ask macOS to unlock the saved key first."
+        }
+        if !isRunning {
+            return "Installing configs starts the local API first so generated URLs match the active port."
+        }
+        return nil
     }
 
     func startServer(allowKeychainPrompt: Bool = true, resolveSavedKey: Bool = true) {
@@ -205,6 +226,9 @@ final class CursorAPIAppModel: ObservableObject {
     }
 
     func install(_ id: AgentIntegrationID) {
+        guard prepareLocalAPIForAgentConfigs() else {
+            return
+        }
         do {
             try provisioner.install(id, settings: settings)
             refreshIntegrations()
@@ -215,6 +239,9 @@ final class CursorAPIAppModel: ObservableObject {
     }
 
     func installAllIntegrations() {
+        guard prepareLocalAPIForAgentConfigs() else {
+            return
+        }
         do {
             integrations = try provisioner.installAll(settings: settings)
             lastError = nil
@@ -271,6 +298,21 @@ final class CursorAPIAppModel: ObservableObject {
         } else {
             statusText = "Ready to start local API"
         }
+    }
+
+    private func prepareLocalAPIForAgentConfigs() -> Bool {
+        guard hasCursorAPIKey else {
+            lastError = "Enter a Cursor API key before installing agent configs."
+            return false
+        }
+        guard sdkConfigured else {
+            lastError = "This app build is missing bundled Composer transport."
+            return false
+        }
+        if !isRunning || needsKeychainPermission {
+            startServer(allowKeychainPrompt: true, resolveSavedKey: true)
+        }
+        return isRunning && !needsKeychainPermission
     }
 
     private func applyLaunchAtLogin() -> String? {

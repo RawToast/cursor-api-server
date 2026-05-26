@@ -102,9 +102,13 @@ struct ContentView: View {
                 }
             }
 
+            if let notice = model.agentSetupNoticeText {
+                AgentSetupNotice(message: notice)
+            }
+
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
                 ForEach(model.integrations) { status in
-                    IntegrationRow(status: status) {
+                    IntegrationRow(status: status, canPrepareAgentConfigs: model.canPrepareAgentConfigs) {
                         model.install(status.id)
                     }
                 }
@@ -112,6 +116,27 @@ struct ContentView: View {
         }
     }
 
+}
+
+struct AgentSetupNotice: View {
+    var message: String
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "info.circle.fill")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.blue)
+            Text(message)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(Color.blue.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
 }
 
 struct AppNoticeBanner: View {
@@ -939,6 +964,7 @@ struct SectionTitle: View {
 
 struct IntegrationRow: View {
     var status: AgentIntegrationStatus
+    var canPrepareAgentConfigs: Bool
     var install: () -> Void
 
     var body: some View {
@@ -951,7 +977,7 @@ struct IntegrationRow: View {
                 PillActionButton(status.actionTitle) {
                     install()
                 }
-                .disabled(status.installed || !status.canInstall)
+                .disabled(status.installed || !status.canInstall || !canPrepareAgentConfigs)
             }
             Text(status.detail)
                 .font(.callout)
