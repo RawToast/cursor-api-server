@@ -24,6 +24,35 @@ final class AgentProvisionerTests: XCTestCase {
         XCTAssertTrue(provisioner.status(for: .opencode, settings: settings).installed)
     }
 
+    func testOpenCodeAndKiloRespectXDGConfigHome() throws {
+        let home = try temporaryHome()
+        let xdgConfig = home.appending(path: "Library/Config")
+        let provisioner = AgentProvisioner(
+            homeDirectory: home,
+            environment: ["XDG_CONFIG_HOME": xdgConfig.path]
+        )
+        let settings = CursorAPISettings(port: 8787)
+
+        try provisioner.install(.opencode, settings: settings)
+        try provisioner.install(.kilo, settings: settings)
+
+        let opencodeConfig = xdgConfig.appending(path: "opencode/opencode.json")
+        let kiloConfig = xdgConfig.appending(path: "kilo/kilo.jsonc")
+        let defaultOpenCodeConfig = home.appending(path: ".config/opencode/opencode.json")
+        let defaultKiloConfig = home.appending(path: ".config/kilo/kilo.jsonc")
+        let opencodeText = try String(contentsOf: opencodeConfig, encoding: .utf8)
+        let kiloText = try String(contentsOf: kiloConfig, encoding: .utf8)
+
+        XCTAssertTrue(opencodeText.contains(CursorAPIBrand.displayName))
+        XCTAssertTrue(kiloText.contains("cursorapi"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: defaultOpenCodeConfig.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: defaultKiloConfig.path))
+        XCTAssertEqual(provisioner.status(for: .opencode, settings: settings).configPath, opencodeConfig.path)
+        XCTAssertEqual(provisioner.status(for: .kilo, settings: settings).configPath, kiloConfig.path)
+        XCTAssertTrue(provisioner.status(for: .opencode, settings: settings).installed)
+        XCTAssertTrue(provisioner.status(for: .kilo, settings: settings).installed)
+    }
+
     func testInstallsCodexProvider() throws {
         let home = try temporaryHome()
         let provisioner = AgentProvisioner(homeDirectory: home)

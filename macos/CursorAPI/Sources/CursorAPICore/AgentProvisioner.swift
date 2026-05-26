@@ -3,10 +3,16 @@ import Foundation
 public final class AgentProvisioner: @unchecked Sendable {
     private let homeDirectory: URL
     private let fileManager: FileManager
+    private let environment: [String: String]
 
-    public init(homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser, fileManager: FileManager = .default) {
+    public init(
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+        fileManager: FileManager = .default,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) {
         self.homeDirectory = homeDirectory
         self.fileManager = fileManager
+        self.environment = environment
     }
 
     public func statuses(settings: CursorAPISettings) -> [AgentIntegrationStatus] {
@@ -352,7 +358,7 @@ public final class AgentProvisioner: @unchecked Sendable {
     }
 
     private func opencodeConfigURL() -> URL {
-        homeDirectory.appending(path: ".config/opencode/opencode.json")
+        configHomeDirectory().appending(path: "opencode/opencode.json")
     }
 
     private func codexConfigURL() -> URL {
@@ -372,11 +378,20 @@ public final class AgentProvisioner: @unchecked Sendable {
     }
 
     private func kiloConfigURL() -> URL {
-        homeDirectory.appending(path: ".config/kilo/kilo.jsonc")
+        configHomeDirectory().appending(path: "kilo/kilo.jsonc")
     }
 
     private func piModelsURL() -> URL {
         homeDirectory.appending(path: ".pi/agent/models.json")
+    }
+
+    private func configHomeDirectory() -> URL {
+        if let value = environment["XDG_CONFIG_HOME"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !value.isEmpty,
+           value.hasPrefix("/") {
+            return URL(fileURLWithPath: value)
+        }
+        return homeDirectory.appending(path: ".config")
     }
 
     private func piModelDefinitions() -> [[String: Any]] {
