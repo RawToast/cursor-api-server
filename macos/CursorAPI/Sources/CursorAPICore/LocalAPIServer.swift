@@ -1046,15 +1046,72 @@ enum HTTPParser {
             headers[key] = value
         }
         let bodyStart = separatorRange.upperBound
-        let expectedLength = Int(headers["content-length"] ?? "0") ?? 0
-        guard data.count - bodyStart >= expectedLength else { return nil }
-        let body = data[bodyStart..<(bodyStart + expectedLength)]
+        let body: Data
+        if transferEncodingIsChunked(headers["transfer-encoding"]) {
+            guard let decoded = decodeChunkedBody(Data(data[bodyStart..<data.endIndex])) else {
+                return nil
+            }
+            body = decoded
+        } else {
+            let expectedLength = Int(headers["content-length"] ?? "0") ?? 0
+            guard data.count - bodyStart >= expectedLength else { return nil }
+            body = Data(data[bodyStart..<(bodyStart + expectedLength)])
+        }
         return HTTPRequest(
             method: String(parts[0]),
             path: targetParts[0],
             query: targetParts.count > 1 ? targetParts[1] : nil,
             headers: headers,
-            body: Data(body)
+            body: body
         )
+    }
+
+    private static func transferEncodingIsChunked(_ value: String?) -> Bool {
+        value?
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .contains("chunked") == true
+    }
+
+    private static func decodeChunkedBody(_ data: Data) -> Data? {
+        let lineBreak = Data("\r\n".utf8)
+        let trailerTerminator = Data("\r\n\r\n".utf8)
+        var offset = data.startIndex
+        var output = Data()
+
+        while offset < data.endIndex {
+            guard let lineRange = data[offset..<data.endIndex].range(of: lineBreak),
+                  let line = String(data: data[offset..<lineRange.lowerBound], encoding: .utf8) else {
+                return nil
+            }
+            let sizeText = line
+                .split(separator: ";", maxSplits: 1, omittingEmptySubsequences: false)
+                .first?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard let size = Int(sizeText, radix: 16), size >= 0 else {
+                return nil
+            }
+
+            offset = lineRange.upperBound
+            if size == 0 {
+                let remaining = data[offset..<data.endIndex]
+                if remaining.starts(with: lineBreak) {
+                    return output
+                }
+                return remaining.range(of: trailerTerminator) == nil ? nil : output
+            }
+
+            guard data.endIndex - offset >= size + lineBreak.count else {
+                return nil
+            }
+            output.append(data[offset..<(offset + size)])
+            offset += size
+            guard data[offset..<(offset + lineBreak.count)] == lineBreak else {
+                return nil
+            }
+            offset += lineBreak.count
+        }
+
+        return nil
     }
 }
