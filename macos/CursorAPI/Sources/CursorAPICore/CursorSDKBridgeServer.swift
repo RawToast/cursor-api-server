@@ -3,6 +3,7 @@ import Network
 
 struct CursorSDKBridgeEndpoint: Sendable {
     var url: URL
+    var healthURL: URL
     var token: String
 }
 
@@ -14,13 +15,17 @@ actor CursorSDKBridgeServer {
     private let token = UUID().uuidString.replacingOccurrences(of: "-", with: "")
 
     func endpoint(settings: CursorAPISettings) async throws -> CursorSDKBridgeEndpoint {
-        if let endpoint, await isHealthy(endpoint.url) {
+        if let endpoint, await isHealthy(endpoint.healthURL) {
             return endpoint
         }
         stop()
         let script = try bridgeScriptURL()
         let port = try await start(script: script, settings: settings)
-        let endpoint = CursorSDKBridgeEndpoint(url: URL(string: "http://127.0.0.1:\(port)/sdk")!, token: token)
+        let endpoint = CursorSDKBridgeEndpoint(
+            url: URL(string: "http://127.0.0.1:\(port)/sdk")!,
+            healthURL: URL(string: "http://127.0.0.1:\(port)/health")!,
+            token: token
+        )
         self.endpoint = endpoint
         return endpoint
     }
@@ -52,8 +57,9 @@ actor CursorSDKBridgeServer {
 
     private func launch(script: URL, port: UInt16, settings: CursorAPISettings) throws {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["node", script.path]
+        let node = try nodeExecutable()
+        process.executableURL = node
+        process.arguments = [script.path]
         var environment = ProcessInfo.processInfo.environment
         environment["CURSOR_SDK_BRIDGE_HOST"] = "127.0.0.1"
         environment["CURSOR_SDK_BRIDGE_PORT"] = String(port)
@@ -68,6 +74,30 @@ actor CursorSDKBridgeServer {
         process.standardError = FileHandle.nullDevice
         try process.run()
         self.process = process
+    }
+
+    private func nodeExecutable() throws -> URL {
+        if let bundled = Bundle.main.url(forResource: "node", withExtension: nil),
+           FileManager.default.isExecutableFile(atPath: bundled.path) {
+            return bundled
+        }
+        let process = Process()
+        let pipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
+        process.arguments = ["node"]
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw CursorAPIError.invalidConfiguration("\(CursorAPIBrand.displayName) is missing its bundled SDK bridge runtime. Repackage the app with the bundled Node runtime.")
+        }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !path.isEmpty, FileManager.default.isExecutableFile(atPath: path) else {
+            throw CursorAPIError.invalidConfiguration("Node is installed but could not be used for the SDK bridge.")
+        }
+        return URL(fileURLWithPath: path)
     }
 
     private func stop() {
