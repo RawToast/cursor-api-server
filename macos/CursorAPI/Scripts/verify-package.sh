@@ -39,8 +39,16 @@ plist_has_nonempty_value() {
 [ "$(plist_value CFBundleIconFile "$INFO_PLIST")" = "APIForCursor" ] || fail "CFBundleIconFile changed"
 
 [ -x "$MACOS_DIR/$APP_NAME" ] || fail "main executable is missing or not executable"
-[ -x "$RESOURCES_DIR/node" ] || fail "bundled Node runtime is missing or not executable"
 [ -s "$RESOURCES_DIR/cursor-sdk-opencode-bridge.mjs" ] || fail "SDK bridge script is missing"
+if [ -x "$RESOURCES_DIR/bun" ]; then
+  BRIDGE_RUNTIME_PATH="$RESOURCES_DIR/bun"
+elif [ -x "$RESOURCES_DIR/node" ]; then
+  BRIDGE_RUNTIME_PATH="$RESOURCES_DIR/node"
+else
+  fail "bundled bridge runtime is missing or not executable"
+fi
+"$BRIDGE_RUNTIME_PATH" -e 'import http2 from "node:http2"; if (typeof http2.connect !== "function") process.exit(1)' >/dev/null \
+  || fail "bundled bridge runtime cannot load node:http2"
 [ -s "$RESOURCES_DIR/APIForCursor.icns" ] || fail "app icon is missing"
 [ -s "$RESOURCES_DIR/APIForCursor.png" ] || fail "runtime app icon PNG is missing"
 swift - "$RESOURCES_DIR/APIForCursor.icns" <<'SWIFT' || fail "app icon does not contain the packaged artwork"

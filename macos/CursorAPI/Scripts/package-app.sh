@@ -18,7 +18,8 @@ ICONSET_DIR="$RESOURCES_DIR/APIForCursor.iconset"
 APP_ICON_SOURCE="$ROOT_DIR/Sources/CursorAPI/Resources/APIForCursor.png"
 BRIDGE_SCRIPT_SOURCE="$REPOSITORY_DIR/scripts/cursor-sdk-opencode-bridge.mjs"
 REQUIRE_BUNDLED_TRANSPORT="${CURSOR_API_REQUIRE_BUNDLED_TRANSPORT:-0}"
-NODE_BINARY_SOURCE="${CURSOR_API_NODE_BINARY:-}"
+BRIDGE_RUNTIME_SOURCE="${CURSOR_API_BRIDGE_RUNTIME_BINARY:-${CURSOR_API_BUN_BINARY:-${CURSOR_API_NODE_BINARY:-}}}"
+BRIDGE_RUNTIME_NAME="${CURSOR_API_BRIDGE_RUNTIME_NAME:-}"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -38,6 +39,12 @@ Usage: $0 [--development|--release]
   --release      Refuse to package unless complete bundled Composer transport
                  defaults are available from local environment files or the
                  current environment.
+
+Environment:
+  CURSOR_API_BRIDGE_RUNTIME_BINARY  Bun or Node runtime to bundle. Defaults to
+                                    Bun when available, then Node.
+  CURSOR_API_BRIDGE_RUNTIME_NAME    Runtime resource name when the binary name
+                                    is ambiguous: bun or node.
 USAGE
       exit 0
       ;;
@@ -61,13 +68,35 @@ fi
 cp "$APP_ICON_SOURCE" "$RESOURCES_DIR/APIForCursor.png"
 [ -s "$BRIDGE_SCRIPT_SOURCE" ] || { echo "Missing SDK bridge script at $BRIDGE_SCRIPT_SOURCE" >&2; exit 1; }
 cp "$BRIDGE_SCRIPT_SOURCE" "$RESOURCES_DIR/cursor-sdk-opencode-bridge.mjs"
-if [ -z "$NODE_BINARY_SOURCE" ] && command -v node >/dev/null 2>&1; then
-  NODE_BINARY_SOURCE="$(node -p 'process.execPath' 2>/dev/null || true)"
+if [ -z "$BRIDGE_RUNTIME_SOURCE" ] && command -v bun >/dev/null 2>&1; then
+  BRIDGE_RUNTIME_SOURCE="$(command -v bun)"
+  BRIDGE_RUNTIME_NAME="bun"
 fi
-[ -n "$NODE_BINARY_SOURCE" ] || { echo "Missing Node runtime; install Node or set CURSOR_API_NODE_BINARY before packaging." >&2; exit 1; }
-[ -x "$NODE_BINARY_SOURCE" ] || { echo "Node runtime is not executable at $NODE_BINARY_SOURCE" >&2; exit 1; }
-cp "$NODE_BINARY_SOURCE" "$RESOURCES_DIR/node"
-chmod 755 "$RESOURCES_DIR/node"
+if [ -z "$BRIDGE_RUNTIME_SOURCE" ] && command -v node >/dev/null 2>&1; then
+  BRIDGE_RUNTIME_SOURCE="$(node -p 'process.execPath' 2>/dev/null || true)"
+  BRIDGE_RUNTIME_NAME="node"
+fi
+[ -n "$BRIDGE_RUNTIME_SOURCE" ] || { echo "Missing bridge runtime; install Bun or Node, or set CURSOR_API_BRIDGE_RUNTIME_BINARY before packaging." >&2; exit 1; }
+[ -x "$BRIDGE_RUNTIME_SOURCE" ] || { echo "Bridge runtime is not executable at $BRIDGE_RUNTIME_SOURCE" >&2; exit 1; }
+if [ -z "$BRIDGE_RUNTIME_NAME" ]; then
+  case "$(basename "$BRIDGE_RUNTIME_SOURCE")" in
+    bun|bun-*) BRIDGE_RUNTIME_NAME="bun" ;;
+    node|node-*) BRIDGE_RUNTIME_NAME="node" ;;
+    *)
+      echo "Could not infer bridge runtime name from $BRIDGE_RUNTIME_SOURCE; set CURSOR_API_BRIDGE_RUNTIME_NAME to bun or node." >&2
+      exit 1
+      ;;
+  esac
+fi
+case "$BRIDGE_RUNTIME_NAME" in
+  bun|node) ;;
+  *)
+    echo "Unsupported bridge runtime name $BRIDGE_RUNTIME_NAME; expected bun or node." >&2
+    exit 1
+    ;;
+esac
+cp "$BRIDGE_RUNTIME_SOURCE" "$RESOURCES_DIR/$BRIDGE_RUNTIME_NAME"
+chmod 755 "$RESOURCES_DIR/$BRIDGE_RUNTIME_NAME"
 swift - "$RESOURCES_DIR" "$ROOT_DIR" <<'SWIFT'
 import Foundation
 import Darwin

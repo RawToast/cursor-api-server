@@ -57,8 +57,8 @@ actor CursorSDKBridgeServer {
 
     private func launch(script: URL, port: UInt16, settings: CursorAPISettings) throws {
         let process = Process()
-        let node = try nodeExecutable()
-        process.executableURL = node
+        let runtime = try runtimeExecutable()
+        process.executableURL = runtime
         process.arguments = [script.path]
         var environment = ProcessInfo.processInfo.environment
         environment["CURSOR_SDK_BRIDGE_HOST"] = "127.0.0.1"
@@ -76,26 +76,39 @@ actor CursorSDKBridgeServer {
         self.process = process
     }
 
-    private func nodeExecutable() throws -> URL {
-        if let bundled = Bundle.main.url(forResource: "node", withExtension: nil),
-           FileManager.default.isExecutableFile(atPath: bundled.path) {
-            return bundled
+    private func runtimeExecutable() throws -> URL {
+        for resourceName in ["bun", "node"] {
+            if let bundled = Bundle.main.url(forResource: resourceName, withExtension: nil),
+               FileManager.default.isExecutableFile(atPath: bundled.path) {
+                return bundled
+            }
         }
+
+        for command in ["bun", "node"] {
+            if let url = try systemExecutable(named: command) {
+                return url
+            }
+        }
+
+        throw CursorAPIError.invalidConfiguration("\(CursorAPIBrand.displayName) is missing its bundled SDK bridge runtime. Repackage the app with Bun or Node bundled.")
+    }
+
+    private func systemExecutable(named command: String) throws -> URL? {
         let process = Process()
         let pipe = Pipe()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
-        process.arguments = ["node"]
+        process.arguments = [command]
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
         try process.run()
         process.waitUntilExit()
         guard process.terminationStatus == 0 else {
-            throw CursorAPIError.invalidConfiguration("\(CursorAPIBrand.displayName) is missing its bundled SDK bridge runtime. Repackage the app with the bundled Node runtime.")
+            return nil
         }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !path.isEmpty, FileManager.default.isExecutableFile(atPath: path) else {
-            throw CursorAPIError.invalidConfiguration("Node is installed but could not be used for the SDK bridge.")
+            throw CursorAPIError.invalidConfiguration("\(command) is installed but could not be used for the SDK bridge.")
         }
         return URL(fileURLWithPath: path)
     }

@@ -74,11 +74,14 @@ done
 [ -d "$APP_PATH" ] || fail "app bundle is missing at $APP_PATH"
 APP_PATH="$(absolute_path "$APP_PATH")"
 
-NODE_BINARY="$APP_PATH/Contents/Resources/node"
-if [ ! -x "$NODE_BINARY" ]; then
-  NODE_BINARY="$(command -v node || true)"
+JS_RUNTIME="$APP_PATH/Contents/Resources/bun"
+if [ ! -x "$JS_RUNTIME" ]; then
+  JS_RUNTIME="$APP_PATH/Contents/Resources/node"
 fi
-[ -x "$NODE_BINARY" ] || fail "Node is required for JSON assertions; package the app or install Node"
+if [ ! -x "$JS_RUNTIME" ]; then
+  JS_RUNTIME="$(command -v bun || command -v node || true)"
+fi
+[ -x "$JS_RUNTIME" ] || fail "Bun or Node is required for JSON assertions; package the app or install one locally"
 
 cleanup() {
   for file in "${TEMP_FILES[@]+"${TEMP_FILES[@]}"}"; do
@@ -117,7 +120,7 @@ post_json() {
 }
 
 extract_chat_content() {
-  "$NODE_BINARY" -e '
+  "$JS_RUNTIME" -e '
 let body = "";
 process.stdin.on("data", (chunk) => body += chunk);
 process.stdin.on("end", () => {
@@ -128,7 +131,7 @@ process.stdin.on("end", () => {
 }
 
 extract_response_text() {
-  "$NODE_BINARY" -e '
+  "$JS_RUNTIME" -e '
 let body = "";
 process.stdin.on("data", (chunk) => body += chunk);
 process.stdin.on("end", () => {
@@ -143,7 +146,7 @@ process.stdin.on("end", () => {
 }
 
 extract_stream_text() {
-  "$NODE_BINARY" -e '
+  "$JS_RUNTIME" -e '
 let body = "";
 process.stdin.on("data", (chunk) => body += chunk);
 process.stdin.on("end", () => {
@@ -180,8 +183,8 @@ responses_content="$(post_json "/responses" "$responses_body" | extract_response
 
 bridge_process_count() {
   ps ax -o command= \
-    | grep -F "$APP_PATH/Contents/Resources/node" \
     | grep -F "cursor-sdk-opencode-bridge.mjs" \
+    | grep -F "$APP_PATH/Contents/Resources/" \
     | grep -v grep \
     | wc -l \
     | tr -d " "
