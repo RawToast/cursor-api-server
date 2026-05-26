@@ -16,18 +16,18 @@ final class CursorAPIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDeleg
         retainedDelegate = delegate
         app.delegate = delegate
         app.setActivationPolicy(.regular)
+        delegate.installMainMenu()
         app.finishLaunching()
+        delegate.revealMainWindow()
+        DispatchQueue.main.async {
+            delegate.model.startServerWithoutPromptIfReady()
+        }
         app.run()
     }
 
-    func applicationDidFinishLaunching(_ notification: Notification) {
-        installMainMenu()
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.revealMainWindow()
-            DispatchQueue.main.async { [weak self] in
-                self?.model.startServerWithoutPromptIfReady()
-            }
+    func applicationDidBecomeActive(_ notification: Notification) {
+        if mainWindow == nil {
+            revealMainWindow()
         }
     }
 
