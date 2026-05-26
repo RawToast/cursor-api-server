@@ -313,6 +313,37 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertTrue(missingData.isEmpty)
     }
 
+    func testHeadReadEndpointsPreserveGetContentLength() async throws {
+        let port = try unusedTCPPort()
+        let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness())
+        try server.start(port: port)
+        defer { server.stop() }
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        let getRequest = [
+            "GET /v1/models HTTP/1.1",
+            "Host: 127.0.0.1:\(port)",
+            "Connection: close",
+            "",
+            ""
+        ].joined(separator: "\r\n")
+        let headRequest = [
+            "HEAD /v1/models HTTP/1.1",
+            "Host: 127.0.0.1:\(port)",
+            "Connection: close",
+            "",
+            ""
+        ].joined(separator: "\r\n")
+
+        let getResponse = try await sendRawHTTPRequest(port: port, request: getRequest)
+        let headResponse = try await sendRawHTTPRequest(port: port, request: headRequest)
+
+        XCTAssertTrue(getResponse.hasPrefix("HTTP/1.1 200 OK"), getResponse)
+        XCTAssertTrue(headResponse.hasPrefix("HTTP/1.1 200 OK"), headResponse)
+        XCTAssertEqual(responseHeaderValue("Content-Length", in: headResponse), responseHeaderValue("Content-Length", in: getResponse))
+        XCTAssertTrue(responseBody(headResponse).isEmpty, headResponse)
+    }
+
     func testModelsEndpointAcceptsOriginBaseURLAndTrailingSlash() async throws {
         let port = try unusedTCPPort()
         let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness())
@@ -483,7 +514,38 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertTrue(allowedHeaders.contains("X-CursorAPI-Session"))
         XCTAssertTrue(allowedHeaders.contains("X-Project-Path"))
         XCTAssertTrue(allowedHeaders.contains("OpenAI-Beta"))
+        XCTAssertTrue(allowedHeaders.contains("X-Request-ID"))
+        XCTAssertTrue(allowedHeaders.contains("X-Stainless-Lang"))
+        XCTAssertTrue(allowedHeaders.contains("X-Stainless-Retry-Count"))
+        XCTAssertEqual(http.value(forHTTPHeaderField: "Access-Control-Max-Age"), "86400")
         XCTAssertTrue(allowedMethods.contains("HEAD"))
+    }
+
+    func testCORSPreflightUsesStandardNoContentStatusLine() async throws {
+        let port = try unusedTCPPort()
+        let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness())
+        try server.start(port: port)
+        defer { server.stop() }
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        let request = [
+            "OPTIONS /v1/responses HTTP/1.1",
+            "Host: 127.0.0.1:\(port)",
+            "Origin: http://localhost:3000",
+            "Access-Control-Request-Method: POST",
+            "Access-Control-Request-Headers: X-Stainless-Lang, X-Stainless-Retry-Count, X-Request-ID",
+            "Connection: close",
+            "",
+            ""
+        ].joined(separator: "\r\n")
+        let response = try await sendRawHTTPRequest(port: port, request: request)
+
+        XCTAssertTrue(response.hasPrefix("HTTP/1.1 204 No Content"), response)
+        XCTAssertEqual(responseHeaderValue("Access-Control-Max-Age", in: response), "86400")
+        let allowedHeaders = responseHeaderValue("Access-Control-Allow-Headers", in: response) ?? ""
+        XCTAssertTrue(allowedHeaders.contains("X-Stainless-Lang"), response)
+        XCTAssertTrue(allowedHeaders.contains("X-Stainless-Retry-Count"), response)
+        XCTAssertTrue(allowedHeaders.contains("X-Request-ID"), response)
     }
 
     func testCompletionsEndpoint() async throws {
@@ -1665,6 +1727,28 @@ private extension LocalAPIServerTests {
         }
         chunks.append("0\r\n\r\n")
         return chunks.joined()
+    }
+
+    func responseHeaderValue(_ name: String, in response: String) -> String? {
+        let headerBlock = response.components(separatedBy: "\r\n\r\n").first ?? response
+        for line in headerBlock.components(separatedBy: "\r\n").dropFirst() {
+            guard let colon = line.firstIndex(of: ":") else {
+                continue
+            }
+            let headerName = line[..<colon].trimmingCharacters(in: .whitespacesAndNewlines)
+            guard headerName.caseInsensitiveCompare(name) == .orderedSame else {
+                continue
+            }
+            return line[line.index(after: colon)...].trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return nil
+    }
+
+    func responseBody(_ response: String) -> String {
+        guard let separator = response.range(of: "\r\n\r\n") else {
+            return ""
+        }
+        return String(response[separator.upperBound...])
     }
 
     func sendRawHTTPRequest(port: UInt16, request: String) async throws -> String {

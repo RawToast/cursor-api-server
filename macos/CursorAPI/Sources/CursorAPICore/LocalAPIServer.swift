@@ -350,6 +350,7 @@ public final class LocalAPIServer: @unchecked Sendable {
     private func readResponse(_ response: HTTPResponse, method: String) -> RoutedHTTPResponse {
         var response = response
         if method == "HEAD" {
+            response.headers["Content-Length"] = "\(response.body.count)"
             response.body = Data()
         }
         return .response(response)
@@ -581,7 +582,9 @@ public final class LocalAPIServer: @unchecked Sendable {
 
     private func send(connection: NWConnection, response: HTTPResponse) {
         var headers = response.headers
-        headers["Content-Length"] = "\(response.body.count)"
+        if !headers.keys.contains(where: { $0.caseInsensitiveCompare("Content-Length") == .orderedSame }) {
+            headers["Content-Length"] = "\(response.body.count)"
+        }
         headers["Connection"] = "close"
         for (key, value) in corsHeaders() {
             headers[key] = value
@@ -654,8 +657,9 @@ public final class LocalAPIServer: @unchecked Sendable {
     private func corsHeaders() -> [String: String] {
         [
             "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Headers": "Authorization, Content-Type, OpenAI-Beta, OpenAI-Organization, OpenAI-Project, X-Session-Affinity, X-OpenCode-Session-Id, X-OpenCode-Session, X-CursorAPI-Session, X-CursorAPI-Project, X-Project-Path, X-Workspace-Path, X-Working-Directory",
-            "Access-Control-Allow-Methods": "GET, HEAD, POST, DELETE, OPTIONS"
+            "Access-Control-Allow-Headers": "Authorization, Content-Type, OpenAI-Beta, OpenAI-Organization, OpenAI-Project, X-Request-ID, X-Stainless-Arch, X-Stainless-Lang, X-Stainless-OS, X-Stainless-Package-Version, X-Stainless-Retry-Count, X-Stainless-Runtime, X-Stainless-Runtime-Version, X-Stainless-Timeout, X-Session-Affinity, X-OpenCode-Session-Id, X-OpenCode-Session, X-CursorAPI-Session, X-CursorAPI-Project, X-Project-Path, X-Workspace-Path, X-Working-Directory",
+            "Access-Control-Allow-Methods": "GET, HEAD, POST, DELETE, OPTIONS",
+            "Access-Control-Max-Age": "86400"
         ]
     }
 
