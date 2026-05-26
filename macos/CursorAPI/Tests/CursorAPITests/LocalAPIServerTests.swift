@@ -1337,6 +1337,88 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertTrue(prepared.prompt.contains("/tmp/project"))
     }
 
+    func testChatFileRequestAddsRequiredLocalToolHint() throws {
+        let prepared = try OpenAICompatibility.prepareChatRequest(Data(#"""
+        {
+          "model": "composer-2.5",
+          "messages": [
+            {"role": "user", "content": "Create ~/Desktop/example.html with hello in it."}
+          ],
+          "tools": [
+            {
+              "type": "function",
+              "function": {
+                "name": "bash",
+                "parameters": {
+                  "type": "object",
+                  "properties": {
+                    "command": { "type": "string" },
+                    "description": { "type": "string" }
+                  }
+                }
+              }
+            },
+            {
+              "type": "function",
+              "function": {
+                "name": "write",
+                "parameters": {
+                  "type": "object",
+                  "properties": {
+                    "filePath": { "type": "string" },
+                    "content": { "type": "string" }
+                  }
+                }
+              }
+            }
+          ]
+        }
+        """#.utf8))
+
+        XCTAssertTrue(prepared.prompt.contains("LOCAL TOOL REQUIRED FOR THE LATEST USER REQUEST"))
+        XCTAssertTrue(prepared.prompt.contains("Emit exactly one SDK tool call next and no prose."))
+        XCTAssertTrue(prepared.prompt.contains("Use SDK shell now."))
+    }
+
+    func testResponsesFileRequestAddsRequiredLocalToolHint() throws {
+        let prepared = try OpenAICompatibility.prepareResponsesRequest(Data(#"""
+        {
+          "model": "composer-2.5",
+          "input": [
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Write /tmp/example.html with hello in it."}]}
+          ],
+          "tools": [
+            {
+              "type": "function",
+              "name": "bash",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "command": { "type": "string" },
+                  "description": { "type": "string" }
+                }
+              }
+            },
+            {
+              "type": "function",
+              "name": "write",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "filePath": { "type": "string" },
+                  "content": { "type": "string" }
+                }
+              }
+            }
+          ]
+        }
+        """#.utf8))
+
+        XCTAssertTrue(prepared.prompt.contains("LOCAL TOOL REQUIRED FOR THE LATEST USER REQUEST"))
+        XCTAssertTrue(prepared.prompt.contains("Emit exactly one SDK tool call next and no prose."))
+        XCTAssertTrue(prepared.prompt.contains("Use SDK shell now."))
+    }
+
     func testChatToolResultsRenderPriorCallsAndContinuationPrompt() throws {
         let prepared = try OpenAICompatibility.prepareChatRequest(Data(#"""
         {

@@ -111,7 +111,8 @@ public enum OpenAICompatibility {
             "You are running through a local Cursor SDK-compatible harness.",
             "The client owns local tool execution. When local inspection, shell commands, or file changes are needed, request a tool call and wait for the tool result.",
             "When the conversation includes LOCAL TOOL RESULT records, treat them as completed SDK tool_call results for your previous tool requests and continue from those results.",
-            "For creating new files, request write calls with both path and fileText.",
+            "For creating new files, prefer SDK shell when a shell client tool is available; otherwise request write calls with both path and fileText.",
+            "Do not claim that you created, edited, inspected, or ran anything locally unless you emitted a tool call and received a LOCAL TOOL RESULT confirming it.",
             "When starting a dev server or other long-running watcher, start it in the background with output redirected and return immediately.",
             "Do not say that agent mode or tools are unavailable."
         ]
@@ -120,6 +121,7 @@ public enum OpenAICompatibility {
         transcript.append("Conversation:")
         var rememberedToolCalls: [String: ResponseToolCallMemory] = [:]
         var sawToolResult = false
+        var latestUserText = ""
 
         for item in messages {
             let role = (item["role"] as? String) ?? "user"
@@ -135,6 +137,9 @@ public enum OpenAICompatibility {
                 transcript.append("LOCAL TOOL RESULT: \(toolResultFeedback(toolCallID: toolCallID, toolName: toolName, text: text, remembered: rememberedToolCalls))")
             } else {
                 transcript.append("\(role.uppercased()): \(text.isEmpty ? "[empty]" : text)")
+                if role == "user", !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    latestUserText = text
+                }
             }
 
             if let toolCalls = item["tool_calls"] as? [[String: Any]] {
@@ -145,6 +150,8 @@ public enum OpenAICompatibility {
         if sawToolResult {
             transcript.append("")
             transcript.append(toolResultContinuation)
+        } else if shouldRequireLocalTool(for: latestUserText, tools: tools) {
+            appendRequiredLocalToolHint(&transcript, tools: tools)
         }
         appendOptions(&transcript, raw)
         let prompt = transcript.joined(separator: "\n")
@@ -249,7 +256,8 @@ public enum OpenAICompatibility {
             "You are running through a local Cursor SDK-compatible harness.",
             "The client owns local tool execution. When local inspection, shell commands, or file changes are needed, request a function_call and wait for the function_call_output.",
             "When the input includes function_call_output records, treat them as completed local tool results for your previous function_call requests and continue from those results.",
-            "For creating new files, request write calls with both path and fileText.",
+            "For creating new files, prefer SDK shell when a shell client tool is available; otherwise request write calls with both path and fileText.",
+            "Do not claim that you created, edited, inspected, or ran anything locally unless you emitted a function_call and received a function_call_output confirming it.",
             "When starting a dev server or other long-running watcher, start it in the background with output redirected and return immediately.",
             "Do not say that agent mode or tools are unavailable."
         ]
@@ -270,6 +278,8 @@ public enum OpenAICompatibility {
         if appendedInput.sawToolOutput {
             transcript.append("")
             transcript.append(toolResultContinuation)
+        } else if shouldRequireLocalTool(for: latestUserText(from: input), tools: tools) {
+            appendRequiredLocalToolHint(&transcript, tools: tools)
         }
         appendOptions(&transcript, raw)
         let prompt = transcript.joined(separator: "\n")
@@ -845,6 +855,40 @@ public enum OpenAICompatibility {
         return String(describing: value!)
     }
 
+    private static func latestUserText(from value: Any?) -> String {
+        if let value = value as? String {
+            return value
+        }
+        if let items = value as? [[String: Any]] {
+            for item in items.reversed() {
+                let type = (item["type"] as? String) ?? ""
+                let role = (item["role"] as? String) ?? (type == "message" ? "user" : "")
+                guard role == "user" || type == "input_text" else { continue }
+                if let content = item["content"] {
+                    let text = contentText(content, role: role.isEmpty ? "user" : role)
+                    if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        return text
+                    }
+                }
+                if let text = item["text"] as? String,
+                   !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    return text
+                }
+            }
+            return ""
+        }
+        if let items = value as? [Any] {
+            for item in items.reversed() {
+                let text = latestUserText(from: item)
+                if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    return text
+                }
+            }
+            return ""
+        }
+        return ""
+    }
+
     private static func normalizedResponseInputItems(_ value: Any?) -> [JSONValue] {
         if let value = value as? String {
             return [responseInputMessage(text: value, id: "item_0")]
@@ -994,6 +1038,11 @@ public enum OpenAICompatibility {
         transcript.append("LOCAL TOOL INVENTORY:")
         transcript.append("Allowed tool names: \(tools.map(\.name).joined(separator: ", "))")
         transcript.append("Use only the client's local tools for filesystem and shell work.")
+        transcript.append("For local work, emit SDK built-in tool calls; the harness translates them to the matching client tool names and schemas.")
+        transcript.append("If you need a local tool, emit the tool call before prose. Do not write progress text such as \"creating the file\" instead of calling a tool.")
+        if hasCompatibleTool("shell", in: tools) {
+            transcript.append("A shell client tool is available. For file creation or overwrite requests, prefer an SDK shell call using mkdir -p and a quoted heredoc.")
+        }
         for tool in tools {
             var record: [String: Any] = ["name": tool.name]
             if let description = tool.description { record["description"] = description }
@@ -1008,6 +1057,45 @@ public enum OpenAICompatibility {
         } else if (toolChoice as? String) == "required" {
             transcript.append("You must call at least one tool.")
         }
+    }
+
+    private static func appendRequiredLocalToolHint(_ transcript: inout [String], tools: [OpenAIToolSpec]) {
+        transcript.append("")
+        transcript.append("LOCAL TOOL REQUIRED FOR THE LATEST USER REQUEST:")
+        transcript.append("The latest user request requires local filesystem or shell execution. Emit exactly one SDK tool call next and no prose.")
+        if hasCompatibleTool("shell", in: tools) {
+            transcript.append("Use SDK shell now. For creating or overwriting a file, run mkdir -p for the parent directory and write the file with a single quoted heredoc. After the client returns a LOCAL TOOL RESULT, continue.")
+        } else {
+            transcript.append("For creating or overwriting a file, use SDK write with path and fileText. After the client returns a LOCAL TOOL RESULT, continue.")
+        }
+    }
+
+    private static func shouldRequireLocalTool(for text: String, tools: [OpenAIToolSpec]) -> Bool {
+        guard !tools.isEmpty else { return false }
+        let lower = text.lowercased()
+        let hasPathSignal = lower.contains("~/")
+            || lower.contains("/")
+            || lower.contains("desktop")
+            || lower.contains("file")
+            || lower.contains("folder")
+            || lower.contains("directory")
+            || lower.range(of: #"\b[\w.-]+\.(html|css|js|ts|tsx|jsx|json|md|txt|py|rb|go|rs|swift|toml|yaml|yml)\b"#, options: .regularExpression) != nil
+        let wantsFileMutation = lower.range(of: #"\b(create|write|save|overwrite|edit|modify|update|delete|remove|make)\b"#, options: .regularExpression) != nil
+        if hasPathSignal, wantsFileMutation, hasAnyCompatibleTool(["write", "shell"], in: tools) {
+            return true
+        }
+        let wantsCommand = lower.range(of: #"\b(run|execute|start|launch)\b"#, options: .regularExpression) != nil
+            && (lower.contains("command") || lower.contains("shell") || lower.contains("terminal") || lower.contains("server"))
+        return wantsCommand && hasCompatibleTool("shell", in: tools)
+    }
+
+    private static func hasAnyCompatibleTool(_ canonicalNames: [String], in tools: [OpenAIToolSpec]) -> Bool {
+        canonicalNames.contains { hasCompatibleTool($0, in: tools) }
+    }
+
+    private static func hasCompatibleTool(_ canonicalName: String, in tools: [OpenAIToolSpec]) -> Bool {
+        let aliases = Set(toolAliases(for: canonicalName).map(normalizedName))
+        return tools.contains { aliases.contains(normalizedName($0.name)) }
     }
 
     private static func toolChoiceFunctionName(_ toolChoice: Any?) -> String? {
@@ -1225,7 +1313,7 @@ public enum OpenAICompatibility {
                output[descriptionKey] == nil {
                 let commandKey = propertyName(matching: ["command", "cmd", "script", "input"], in: properties)
                 let command = commandKey.flatMap { output[$0]?.stringValue } ?? "shell command"
-                output[descriptionKey] = .string("Run \(command)")
+                output[descriptionKey] = .string(shellToolDescription(for: command))
             }
         case "write":
             copy("path", as: pathPropertyAliases())
@@ -1366,6 +1454,18 @@ public enum OpenAICompatibility {
         return patterns.contains { pattern in
             trimmed.range(of: pattern, options: .regularExpression) != nil
         }
+    }
+
+    private static func shellToolDescription(for command: String) -> String {
+        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = trimmed.lowercased()
+        if lower.contains("cat >") || lower.contains("tee ") || lower.contains("mkdir -p") {
+            return "Create requested file"
+        }
+        if trimmed.contains("\n") || trimmed.count > 80 {
+            return "Run local shell command"
+        }
+        return "Run \(trimmed.isEmpty ? "shell command" : trimmed)"
     }
 
     private static func detachedShellCommand(_ command: String) -> String {
