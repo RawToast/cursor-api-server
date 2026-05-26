@@ -215,6 +215,7 @@ let outputDirectory = URL(fileURLWithPath: CommandLine.arguments[1])
 
 func writeIcon(points: Int, scale: Int, name: String) throws {
     let pixels = points * scale
+    let isSmall = pixels <= 64
     let colorSpace = CGColorSpaceCreateDeviceRGB()
     guard let context = CGContext(
         data: nil,
@@ -234,17 +235,17 @@ func writeIcon(points: Int, scale: Int, name: String) throws {
     context.setShouldAntialias(true)
     context.interpolationQuality = .high
 
-    let tileRect = bounds.insetBy(dx: size * 0.035, dy: size * 0.035)
+    let tileRect = bounds.insetBy(dx: size * 0.022, dy: size * 0.022)
     let radius = size * 0.215
     let tilePath = CGPath(roundedRect: tileRect, cornerWidth: radius, cornerHeight: radius, transform: nil)
 
     context.saveGState()
     context.setShadow(
-        offset: CGSize(width: 0, height: -size * 0.026),
-        blur: size * 0.07,
-        color: CGColor(gray: 0, alpha: 0.34)
+        offset: CGSize(width: 0, height: -size * 0.032),
+        blur: size * 0.082,
+        color: CGColor(gray: 0, alpha: 0.36)
     )
-    context.setFillColor(CGColor(red: 0.02, green: 0.02, blue: 0.018, alpha: 1))
+    context.setFillColor(CGColor(red: 0.012, green: 0.014, blue: 0.018, alpha: 1))
     context.addPath(tilePath)
     context.fillPath()
     context.restoreGState()
@@ -256,11 +257,11 @@ func writeIcon(points: Int, scale: Int, name: String) throws {
     let baseGradient = CGGradient(
         colorsSpace: colorSpace,
         colors: [
-            CGColor(red: 0.14, green: 0.16, blue: 0.20, alpha: 1.0),
-            CGColor(red: 0.035, green: 0.045, blue: 0.055, alpha: 1.0),
-            CGColor(red: 0.0, green: 0.0, blue: 0.0, alpha: 1.0)
+            CGColor(red: 0.11, green: 0.20, blue: 0.24, alpha: 1.0),
+            CGColor(red: 0.036, green: 0.048, blue: 0.066, alpha: 1.0),
+            CGColor(red: 0.004, green: 0.006, blue: 0.012, alpha: 1.0)
         ] as CFArray,
-        locations: [0.0, 0.58, 1.0]
+        locations: [0.0, 0.56, 1.0]
     )!
     context.drawLinearGradient(
         baseGradient,
@@ -272,26 +273,27 @@ func writeIcon(points: Int, scale: Int, name: String) throws {
     let accentGradient = CGGradient(
         colorsSpace: colorSpace,
         colors: [
-            CGColor(red: 0.16, green: 0.58, blue: 1.0, alpha: 0.48),
+            CGColor(red: 0.12, green: 0.60, blue: 1.0, alpha: 0.55),
+            CGColor(red: 0.00, green: 0.88, blue: 0.68, alpha: 0.18),
             CGColor(red: 0.0, green: 0.0, blue: 0.0, alpha: 0.0)
         ] as CFArray,
-        locations: [0.0, 1.0]
+        locations: [0.0, 0.34, 1.0]
     )!
     context.drawRadialGradient(
         accentGradient,
-        startCenter: CGPoint(x: tileRect.minX + tileRect.width * 0.27, y: tileRect.maxY - tileRect.height * 0.19),
+        startCenter: CGPoint(x: tileRect.minX + tileRect.width * 0.32, y: tileRect.maxY - tileRect.height * 0.18),
         startRadius: 0,
-        endCenter: CGPoint(x: tileRect.minX + tileRect.width * 0.27, y: tileRect.maxY - tileRect.height * 0.19),
-        endRadius: tileRect.width * 0.88,
+        endCenter: CGPoint(x: tileRect.minX + tileRect.width * 0.32, y: tileRect.maxY - tileRect.height * 0.18),
+        endRadius: tileRect.width * 0.92,
         options: []
     )
 
     let lowerGlow = CGGradient(
         colorsSpace: colorSpace,
         colors: [
-            CGColor(red: 0.0, green: 0.78, blue: 1.0, alpha: 0.0),
-            CGColor(red: 0.0, green: 0.58, blue: 1.0, alpha: 0.34),
-            CGColor(red: 0.0, green: 0.18, blue: 0.30, alpha: 0.0)
+            CGColor(red: 0.0, green: 0.70, blue: 1.0, alpha: 0.0),
+            CGColor(red: 0.0, green: 0.58, blue: 1.0, alpha: 0.38),
+            CGColor(red: 0.0, green: 0.55, blue: 0.44, alpha: 0.0)
         ] as CFArray,
         locations: [0.0, 0.54, 1.0]
     )!
@@ -302,35 +304,60 @@ func writeIcon(points: Int, scale: Int, name: String) throws {
         options: []
     )
 
+    let topSheen = CGGradient(
+        colorsSpace: colorSpace,
+        colors: [
+            CGColor(gray: 1.0, alpha: 0.20),
+            CGColor(gray: 1.0, alpha: 0.02),
+            CGColor(gray: 1.0, alpha: 0.0)
+        ] as CFArray,
+        locations: [0.0, 0.42, 1.0]
+    )!
+    let sheenRect = CGRect(
+        x: tileRect.minX + tileRect.width * 0.06,
+        y: tileRect.maxY - tileRect.height * 0.22,
+        width: tileRect.width * 0.88,
+        height: tileRect.height * 0.16
+    )
+    context.saveGState()
+    context.addEllipse(in: sheenRect)
+    context.clip()
+    context.drawLinearGradient(
+        topSheen,
+        start: CGPoint(x: sheenRect.midX, y: sheenRect.maxY),
+        end: CGPoint(x: sheenRect.midX, y: sheenRect.minY),
+        options: []
+    )
+    context.restoreGState()
+
     context.addPath(CGPath(roundedRect: tileRect.insetBy(dx: size * 0.012, dy: size * 0.012), cornerWidth: radius * 0.92, cornerHeight: radius * 0.92, transform: nil))
-    context.setStrokeColor(CGColor(gray: 1.0, alpha: 0.16))
+    context.setStrokeColor(CGColor(gray: 1.0, alpha: 0.18))
     context.setLineWidth(max(1, size * 0.008))
     context.strokePath()
     context.restoreGState()
 
-    let markRect = tileRect.insetBy(dx: tileRect.width * 0.13, dy: tileRect.height * 0.18)
-    let bridgeTop = markRect.minY + markRect.height * 0.78
-    let bridgeDeckY = markRect.minY + markRect.height * 0.35
-    let bridgeBaseY = markRect.minY + markRect.height * 0.19
-    let towerWidth = markRect.width * 0.13
-    let towerHeight = markRect.height * 0.55
+    let markRect = tileRect.insetBy(dx: tileRect.width * 0.075, dy: tileRect.height * 0.095)
+    let bridgeDeckY = markRect.minY + markRect.height * 0.29
+    let bridgeTop = markRect.maxY - markRect.height * 0.07
+    let towerWidth = markRect.width * 0.15
+    let towerHeight = markRect.height * 0.67
     let leftTower = CGRect(
         x: markRect.minX + markRect.width * 0.18,
-        y: bridgeDeckY - markRect.height * 0.06,
+        y: bridgeDeckY - markRect.height * 0.025,
         width: towerWidth,
         height: towerHeight
     )
     let rightTower = CGRect(
         x: markRect.maxX - markRect.width * 0.18 - towerWidth,
-        y: bridgeDeckY - markRect.height * 0.06,
+        y: bridgeDeckY - markRect.height * 0.025,
         width: towerWidth,
         height: towerHeight
     )
     let deckRect = CGRect(
-        x: markRect.minX + markRect.width * 0.04,
-        y: bridgeDeckY - markRect.height * 0.05,
-        width: markRect.width * 0.92,
-        height: markRect.height * 0.12
+        x: markRect.minX + markRect.width * 0.01,
+        y: bridgeDeckY - markRect.height * 0.07,
+        width: markRect.width * 0.98,
+        height: markRect.height * 0.15
     )
 
     func strokePath(_ path: CGPath, color: CGColor, width: CGFloat, shadow: Bool = false) {
@@ -352,26 +379,28 @@ func writeIcon(points: Int, scale: Int, name: String) throws {
     }
 
     let archPath = CGMutablePath()
-    archPath.move(to: CGPoint(x: deckRect.minX + deckRect.width * 0.08, y: bridgeDeckY + deckRect.height * 0.55))
+    archPath.move(to: CGPoint(x: deckRect.minX + deckRect.width * 0.035, y: deckRect.maxY + deckRect.height * 0.14))
     archPath.addQuadCurve(
-        to: CGPoint(x: deckRect.maxX - deckRect.width * 0.08, y: bridgeDeckY + deckRect.height * 0.55),
+        to: CGPoint(x: deckRect.maxX - deckRect.width * 0.035, y: deckRect.maxY + deckRect.height * 0.14),
         control: CGPoint(x: markRect.midX, y: bridgeTop)
     )
-    strokePath(archPath, color: CGColor(red: 0.13, green: 0.58, blue: 1.0, alpha: 0.60), width: markRect.width * 0.115, shadow: true)
-    strokePath(archPath, color: CGColor(red: 0.98, green: 0.99, blue: 1.0, alpha: 1.0), width: markRect.width * 0.075)
+    strokePath(archPath, color: CGColor(red: 0.0, green: 0.48, blue: 1.0, alpha: 0.74), width: markRect.width * 0.145, shadow: true)
+    strokePath(archPath, color: CGColor(red: 0.97, green: 0.995, blue: 1.0, alpha: 1.0), width: markRect.width * 0.092)
 
-    for fraction in [0.27, 0.38, 0.50, 0.62, 0.73] {
-        let x = deckRect.minX + deckRect.width * CGFloat(fraction)
-        let topOffset = abs(CGFloat(fraction) - 0.5) * markRect.height * 0.76
-        let cableTop = CGPoint(x: x, y: bridgeTop - topOffset - markRect.height * 0.03)
-        let cableBottom = CGPoint(x: x, y: deckRect.maxY - markRect.height * 0.01)
-        context.beginPath()
-        context.move(to: cableTop)
-        context.addLine(to: cableBottom)
-        context.setStrokeColor(CGColor(red: 0.74, green: 0.88, blue: 1.0, alpha: 0.62))
-        context.setLineWidth(max(1, markRect.width * 0.014))
-        context.setLineCap(.round)
-        context.strokePath()
+    if !isSmall {
+        for fraction in [0.24, 0.34, 0.44, 0.56, 0.66, 0.76] {
+            let x = deckRect.minX + deckRect.width * CGFloat(fraction)
+            let topOffset = abs(CGFloat(fraction) - 0.5) * markRect.height * 0.86
+            let cableTop = CGPoint(x: x, y: bridgeTop - topOffset - markRect.height * 0.04)
+            let cableBottom = CGPoint(x: x, y: deckRect.maxY + markRect.height * 0.012)
+            context.beginPath()
+            context.move(to: cableTop)
+            context.addLine(to: cableBottom)
+            context.setStrokeColor(CGColor(red: 0.64, green: 0.84, blue: 1.0, alpha: 0.68))
+            context.setLineWidth(max(1.4, markRect.width * 0.015))
+            context.setLineCap(.round)
+            context.strokePath()
+        }
     }
 
     let towerGradient = CGGradient(
@@ -387,8 +416,8 @@ func writeIcon(points: Int, scale: Int, name: String) throws {
         let towerPath = CGPath(roundedRect: tower, cornerWidth: tower.width * 0.28, cornerHeight: tower.width * 0.28, transform: nil)
         context.saveGState()
         context.setShadow(
-            offset: CGSize(width: 0, height: -size * 0.010),
-            blur: size * 0.018,
+            offset: CGSize(width: 0, height: -size * 0.013),
+            blur: size * 0.024,
             color: CGColor(gray: 0, alpha: 0.42)
         )
         context.addPath(towerPath)
@@ -401,21 +430,23 @@ func writeIcon(points: Int, scale: Int, name: String) throws {
         )
         context.restoreGState()
 
-        let slotRect = CGRect(
-            x: tower.midX - tower.width * 0.16,
-            y: tower.maxY - tower.height * 0.22,
-            width: tower.width * 0.32,
-            height: tower.height * 0.48
-        )
-        context.addPath(CGPath(roundedRect: slotRect, cornerWidth: slotRect.width * 0.35, cornerHeight: slotRect.width * 0.35, transform: nil))
-        context.setFillColor(CGColor(red: 0.045, green: 0.075, blue: 0.10, alpha: 0.88))
-        context.fillPath()
+        if !isSmall {
+            let slotRect = CGRect(
+                x: tower.midX - tower.width * 0.15,
+                y: tower.maxY - tower.height * 0.48,
+                width: tower.width * 0.30,
+                height: tower.height * 0.39
+            )
+            context.addPath(CGPath(roundedRect: slotRect, cornerWidth: slotRect.width * 0.38, cornerHeight: slotRect.width * 0.38, transform: nil))
+            context.setFillColor(CGColor(red: 0.035, green: 0.055, blue: 0.07, alpha: 0.90))
+            context.fillPath()
+        }
     }
 
     context.saveGState()
     context.setShadow(
-        offset: CGSize(width: 0, height: -size * 0.010),
-        blur: size * 0.020,
+        offset: CGSize(width: 0, height: -size * 0.014),
+        blur: size * 0.024,
         color: CGColor(gray: 0, alpha: 0.38)
     )
     context.addPath(CGPath(roundedRect: deckRect, cornerWidth: deckRect.height * 0.48, cornerHeight: deckRect.height * 0.48, transform: nil))
@@ -424,21 +455,23 @@ func writeIcon(points: Int, scale: Int, name: String) throws {
     context.restoreGState()
 
     let baseRect = CGRect(
-        x: markRect.minX,
-        y: bridgeBaseY,
-        width: markRect.width,
-        height: markRect.height * 0.09
+        x: markRect.minX + markRect.width * 0.02,
+        y: deckRect.minY - markRect.height * 0.12,
+        width: markRect.width * 0.96,
+        height: markRect.height * 0.10
     )
     context.addPath(CGPath(roundedRect: baseRect, cornerWidth: baseRect.height * 0.5, cornerHeight: baseRect.height * 0.5, transform: nil))
     context.setFillColor(CGColor(red: 0.04, green: 0.50, blue: 1.0, alpha: 0.92))
     context.fillPath()
 
-    for fraction in [0.17, 0.83] {
-        let nodeRadius = markRect.width * 0.035
-        let nodeCenter = CGPoint(x: baseRect.minX + baseRect.width * CGFloat(fraction), y: baseRect.midY)
-        context.addEllipse(in: CGRect(x: nodeCenter.x - nodeRadius, y: nodeCenter.y - nodeRadius, width: nodeRadius * 2, height: nodeRadius * 2))
-        context.setFillColor(CGColor(red: 0.92, green: 0.98, blue: 1.0, alpha: 1.0))
-        context.fillPath()
+    if !isSmall {
+        for fraction in [0.16, 0.84] {
+            let nodeRadius = markRect.width * 0.044
+            let nodeCenter = CGPoint(x: baseRect.minX + baseRect.width * CGFloat(fraction), y: baseRect.midY)
+            context.addEllipse(in: CGRect(x: nodeCenter.x - nodeRadius, y: nodeCenter.y - nodeRadius, width: nodeRadius * 2, height: nodeRadius * 2))
+            context.setFillColor(CGColor(red: 0.91, green: 0.98, blue: 1.0, alpha: 1.0))
+            context.fillPath()
+        }
     }
 
     guard let image = context.makeImage() else {
