@@ -5,13 +5,14 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_PATH="$ROOT_DIR/dist/API for Cursor.app"
 TIMEOUT_SECONDS=45
 RUN_OPENCODE=1
+RUN_DEEP_OPENCODE=0
 KEEP_RUNNING=0
 TEMP_DIRS=()
 TEMP_FILES=()
 
 usage() {
   cat <<USAGE
-Usage: CURSOR_API_TEST_KEY=crsr_... $0 [--app PATH] [--timeout SECONDS] [--skip-opencode] [--keep-running]
+Usage: CURSOR_API_TEST_KEY=crsr_... $0 [--app PATH] [--timeout SECONDS] [--skip-opencode] [--deep-opencode] [--keep-running]
 
 Launch the packaged macOS app and verify the live Composer routing path using
 an environment-provided Cursor API key. This checks direct chat completions,
@@ -22,6 +23,7 @@ installed.
   --app PATH        App bundle to launch. Defaults to dist/API for Cursor.app.
   --timeout N       Seconds to wait for app and live requests. Default: 45.
   --skip-opencode   Skip the interactive OpenCode check.
+  --deep-opencode   Also run a longer OpenCode Vite/React project build.
   --keep-running    Leave the launched app running after the smoke check.
 USAGE
 }
@@ -54,6 +56,9 @@ while [ "$#" -gt 0 ]; do
       ;;
     --skip-opencode)
       RUN_OPENCODE=0
+      ;;
+    --deep-opencode)
+      RUN_DEEP_OPENCODE=1
       ;;
     --keep-running)
       KEEP_RUNNING=1
@@ -189,6 +194,65 @@ bridge_process_count() {
     | grep -v grep \
     | wc -l \
     | tr -d " "
+}
+
+verify_deep_opencode_todo_app() {
+  local deep_timeout="$TIMEOUT_SECONDS"
+  if [ "$deep_timeout" -lt 180 ]; then
+    deep_timeout=180
+  fi
+
+  local deep_project
+  local deep_output
+  local deep_build_output
+  deep_project="$(mktemp -d "${TMPDIR:-/tmp}/api-for-cursor-live-opencode-deep-project.XXXXXX")"
+  deep_output="$(mktemp "${TMPDIR:-/tmp}/api-for-cursor-live-opencode-deep-run.XXXXXX")"
+  deep_build_output="$(mktemp "${TMPDIR:-/tmp}/api-for-cursor-live-opencode-deep-build.XXXXXX")"
+  TEMP_DIRS+=("$deep_project")
+  TEMP_FILES+=("$deep_output" "$deep_build_output")
+
+  (
+    cd "$deep_project"
+    HOME="$temp_home" XDG_CONFIG_HOME="$temp_config" \
+      opencode --pure run --agent build --model cursorapi/composer-2.5-fast --format json --dangerously-skip-permissions \
+        "Build a todo app in Vite 8 and React. Create the files in this empty project, install or declare any needed package scripts, and keep it minimal but runnable."
+  ) >"$deep_output" 2>&1 &
+  local deep_pid=$!
+  local deadline=$((SECONDS + deep_timeout))
+  while kill -0 "$deep_pid" >/dev/null 2>&1; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      kill "$deep_pid" >/dev/null 2>&1 || true
+      wait "$deep_pid" >/dev/null 2>&1 || true
+      tail -120 "$deep_output"
+      fail "OpenCode deep Vite/React build did not finish before timeout"
+    fi
+    sleep 1
+  done
+  wait "$deep_pid" >/dev/null 2>&1 || true
+
+  if grep -E "SchemaError|Invalid tool|tool_use_error|missing.*required|NoSuchTool" "$deep_output" >/dev/null; then
+    tail -160 "$deep_output"
+    fail "OpenCode deep Vite/React build reported a tool/schema error"
+  fi
+
+  [ -f "$deep_project/package.json" ] || fail "OpenCode deep build did not create package.json"
+  [ -f "$deep_project/index.html" ] || fail "OpenCode deep build did not create index.html"
+  if [ ! -f "$deep_project/src/App.jsx" ] && [ ! -f "$deep_project/src/App.tsx" ]; then
+    fail "OpenCode deep build did not create a React App component"
+  fi
+  grep -F '"vite"' "$deep_project/package.json" >/dev/null || fail "OpenCode deep build package.json does not declare Vite"
+  grep -F '"react"' "$deep_project/package.json" >/dev/null || fail "OpenCode deep build package.json does not declare React"
+  grep -F '"build"' "$deep_project/package.json" >/dev/null || fail "OpenCode deep build package.json does not declare a build script"
+
+  if [ ! -d "$deep_project/node_modules" ]; then
+    (cd "$deep_project" && npm install --no-audit --fund=false) >"$deep_build_output" 2>&1 \
+      || { cat "$deep_build_output"; fail "OpenCode deep build dependencies could not be installed"; }
+  fi
+  (cd "$deep_project" && npm run build) >"$deep_build_output" 2>&1 \
+    || { cat "$deep_build_output"; fail "OpenCode deep Vite/React app did not build"; }
+
+  grep -F '"tool":"bash"' "$deep_output" >/dev/null || fail "OpenCode deep build did not execute local tools"
+  echo "Verified live OpenCode deep Vite/React app build through API for Cursor."
 }
 
 bridge_count="$(bridge_process_count)"
@@ -448,6 +512,9 @@ JSON
       echo "Verified live OpenCode generic file write through API for Cursor."
       bridge_count="$(bridge_process_count)"
       [ "$bridge_count" = "1" ] || fail "expected one shared SDK bridge process after OpenCode, found $bridge_count"
+      if [ "$RUN_DEEP_OPENCODE" -eq 1 ]; then
+        verify_deep_opencode_todo_app
+      fi
       exit 0
     fi
     sleep 1
