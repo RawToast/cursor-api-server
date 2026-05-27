@@ -1856,6 +1856,12 @@ public enum OpenAICompatibility {
             return compactJSON([
                 "paths": firstArgument(in: arguments, keys: fileCollectionAliases())?.value
             ])
+        case "semsearch":
+            return compactJSON([
+                "query": firstArgument(in: arguments, keys: semanticSearchQueryAliases())?.value,
+                "targetDirectories": firstArgument(in: arguments, keys: semanticSearchDirectoryAliases())?.value,
+                "explanation": firstArgument(in: arguments, keys: ["explanation", "reason", "why", "description"])?.value
+            ])
         case "todowrite":
             return compactJSON([
                 "todos": firstArgument(in: arguments, keys: todoCollectionAliases())?.value
@@ -2331,9 +2337,9 @@ public enum OpenAICompatibility {
                 consumed.insert(payloadArgument.key)
             }
         case "semsearch":
-            copy("query", as: ["pattern", "search"])
-            copy("targetDirectories", as: ["target_directories", "directories", "paths"])
-            copy("explanation", as: ["reason", "why"])
+            copyFirst(semanticSearchQueryAliases(), as: semanticSearchQueryAliases())
+            copyFirst(semanticSearchDirectoryAliases(), as: semanticSearchDirectoryAliases())
+            copy("explanation", as: ["reason", "why", "description"])
         case "todowrite":
             copyFirst(todoCollectionAliases(), as: todoCollectionAliases())
         default:
@@ -2853,10 +2859,10 @@ public enum OpenAICompatibility {
             let path = firstArgument(in: arguments, keys: pathPropertyAliases() + ["directory", "dir"])?.value.stringValue ?? "."
             return "ls -la \(shellSingleQuoted(path))"
         case "semsearch":
-            guard let query = firstArgument(in: arguments, keys: ["query", "pattern", "search"])?.value.stringValue else {
+            guard let query = firstArgument(in: arguments, keys: semanticSearchQueryAliases())?.value.stringValue else {
                 return nil
             }
-            let directories = firstArgument(in: arguments, keys: ["targetDirectories", "target_directories", "directories", "paths"])?.value.stringArrayValue ?? ["."]
+            let directories = firstArgument(in: arguments, keys: semanticSearchDirectoryAliases())?.value.stringArrayValue ?? ["."]
             return (["rg", "--line-number", "--color", "never", "--hidden", shellSingleQuoted(query)] + directories.map(shellSingleQuoted)).joined(separator: " ")
         default:
             return nil
@@ -4299,7 +4305,7 @@ public enum OpenAICompatibility {
         case "mcp":
             return has(["toolName", "tool_name", "tool", "name"])
         case "semsearch":
-            return toolCanonical == "semsearch" && has(["query", "pattern", "search"])
+            return toolCanonical == "semsearch" && has(semanticSearchQueryAliases())
         case "todowrite":
             return has(todoCollectionAliases())
         default:
@@ -4442,6 +4448,13 @@ public enum OpenAICompatibility {
             if todoCollectionAliases().map(normalizedName).contains(normalizedKey) {
                 return todoCollectionAliases()
             }
+        case "semsearch":
+            if semanticSearchQueryAliases().map(normalizedName).contains(normalizedKey) {
+                return semanticSearchQueryAliases()
+            }
+            if semanticSearchDirectoryAliases().map(normalizedName).contains(normalizedKey) {
+                return semanticSearchDirectoryAliases()
+            }
         default:
             break
         }
@@ -4469,7 +4482,7 @@ public enum OpenAICompatibility {
             return "ls"
         case "readlints", "diagnostics", "getdiagnostics":
             return "readlints"
-        case "semanticsearch", "semsearch", "searchcode":
+        case "semanticsearch", "semsearch", "searchcode", "codesearch", "semanticcodesearch":
             return "semsearch"
         case "updatetodos", "updatetodostoolcall", "writetodos", "todowrite", "todowritetoolcall":
             return "todowrite"
@@ -4503,7 +4516,7 @@ public enum OpenAICompatibility {
         case "mcp":
             return ["mcp", "call_mcp_tool"]
         case "semsearch":
-            return ["sem_search", "semantic_search", "search_code"]
+            return ["sem_search", "semantic_search", "search_code", "code_search", "semantic_code_search"]
         case "todowrite":
             return ["todowrite", "todo_write", "update_todos", "updateTodos", "write_todos"]
         default:
@@ -4593,6 +4606,22 @@ public enum OpenAICompatibility {
             "basePath", "base_path", "searchPath", "search_path",
             "targetDirectories", "target_directories", "directories", "folders", "paths", "roots",
             "rootDirs", "root_dirs", "basePaths", "base_paths", "searchPaths", "search_paths"
+        ]
+    }
+
+    private static func semanticSearchQueryAliases() -> [String] {
+        [
+            "query", "pattern", "search", "searchQuery", "search_query",
+            "semanticQuery", "semantic_query", "prompt"
+        ]
+    }
+
+    private static func semanticSearchDirectoryAliases() -> [String] {
+        [
+            "targetDirectories", "target_directories", "targetDirectory", "target_directory",
+            "directories", "directory", "paths", "path", "folders", "folder", "roots", "root",
+            "searchPaths", "search_paths", "searchPath", "search_path",
+            "basePaths", "base_paths", "basePath", "base_path"
         ]
     }
 

@@ -5440,6 +5440,59 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertEqual(arguments[1]["targetDirectories"] as? [String], ["src", "app"])
     }
 
+    func testChatToolCallsMapSDKSemanticSearchToCodeSearchDirectoryAliases() throws {
+        let prepared = try OpenAICompatibility.prepareChatRequest(Data(#"""
+        {
+          "model":"composer-2.5",
+          "messages":[{"role":"user","content":"search the code"}],
+          "tools":[
+            {
+              "type":"function",
+              "function":{
+                "name":"code_search",
+                "parameters":{
+                  "type":"object",
+                  "additionalProperties":false,
+                  "properties":{
+                    "query":{"type":"string"},
+                    "directories":{"type":"array","items":{"type":"string"},"minItems":1},
+                    "reason":{"type":"string"}
+                  },
+                  "required":["query","directories"]
+                }
+              }
+            }
+          ]
+        }
+        """#.utf8))
+        let output = CursorSDKOutput(text: "", toolCalls: [
+            CursorToolCall(name: "semSearch", arguments: [
+                "query": .string("submit button"),
+                "targetDirectory": .string("src"),
+                "explanation": .string("inspect UI wiring")
+            ])
+        ], agentID: "agent-test", runID: "run-test")
+
+        let object = OpenAICompatibility.chatCompletionResponse(
+            id: "chatcmpl_semsearch",
+            created: 1,
+            prepared: prepared,
+            output: output
+        )
+
+        let choices = try XCTUnwrap(object["choices"] as? [[String: Any]])
+        let message = try XCTUnwrap(choices.first?["message"] as? [String: Any])
+        let toolCalls = try XCTUnwrap(message["tool_calls"] as? [[String: Any]])
+        let function = try XCTUnwrap(toolCalls.first?["function"] as? [String: Any])
+        let arguments = try decodedArguments(function)
+
+        XCTAssertEqual(function["name"] as? String, "code_search")
+        XCTAssertEqual(arguments["query"] as? String, "submit button")
+        XCTAssertEqual(arguments["directories"] as? [String], ["src"])
+        XCTAssertEqual(arguments["reason"] as? String, "inspect UI wiring")
+        XCTAssertNil(arguments["targetDirectory"])
+    }
+
     func testChatToolCallsMapSDKReadLintsToFilePathArraySchema() throws {
         let prepared = try OpenAICompatibility.prepareChatRequest(Data(#"""
         {
@@ -7636,6 +7689,53 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertEqual(arguments[3]["globPattern"] as? String, "**/*.tsx")
     }
 
+    func testResponsesSemanticSearchOutputsFeedBackWithSDKArguments() throws {
+        let prepared = try OpenAICompatibility.prepareResponsesRequest(Data(#"""
+        {
+          "model":"composer-2.5",
+          "input":[
+            {
+              "type":"function_call",
+              "call_id":"call_semsearch",
+              "name":"code_search",
+              "arguments":"{\"search\":\"submit button\",\"directories\":[\"src\",\"app\"],\"reason\":\"inspect UI wiring\"}"
+            },
+            {
+              "type":"function_call_output",
+              "call_id":"call_semsearch",
+              "output":"src/App.tsx:12: submit button"
+            }
+          ],
+          "tools":[
+            {
+              "type":"function",
+              "name":"code_search",
+              "parameters":{
+                "type":"object",
+                "additionalProperties":false,
+                "properties":{
+                  "search":{"type":"string"},
+                  "directories":{"type":"array","items":{"type":"string"}},
+                  "reason":{"type":"string"}
+                },
+                "required":["search","directories"]
+              }
+            }
+          ]
+        }
+        """#.utf8))
+
+        let prefix = "LOCAL TOOL RESULT: "
+        let feedbackLine = try XCTUnwrap(prepared.prompt.split(separator: "\n").first { $0.hasPrefix(prefix) })
+        let feedback = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(String(feedbackLine.dropFirst(prefix.count)).utf8)) as? [String: Any])
+        let arguments = try XCTUnwrap(feedback["arguments"] as? [String: Any])
+
+        XCTAssertEqual(feedback["toolName"] as? String, "semsearch")
+        XCTAssertEqual(arguments["query"] as? String, "submit button")
+        XCTAssertEqual(arguments["targetDirectories"] as? [String], ["src", "app"])
+        XCTAssertEqual(arguments["explanation"] as? String, "inspect UI wiring")
+    }
+
     func testResponsesToolResultsFeedEmulatedShellCallsBackWithOriginalSDKArguments() throws {
         let tools: [[String: Any]] = [
             [
@@ -8057,11 +8157,34 @@ private func sendResponseRequest(port: UInt16, body: String) async throws {
     }
 }
 
-private extension LocalAPIServerTests {
-    func unusedTCPPort() throws -> UInt16 {
+private final class TestPortAllocator: @unchecked Sendable {
+    static let shared = TestPortAllocator()
+
+    private let lock = NSLock()
+    private var nextPort: UInt16 = 20_000
+    private let firstPort: UInt16 = 20_000
+    private let lastPort: UInt16 = 48_000
+
+    private init() {}
+
+    func nextAvailablePort() throws -> UInt16 {
+        lock.lock()
+        defer { lock.unlock() }
+
+        for _ in firstPort...lastPort {
+            let candidate = nextPort
+            nextPort = candidate == lastPort ? firstPort : candidate + 1
+            if isAvailable(candidate) {
+                return candidate
+            }
+        }
+        throw POSIXError(.EADDRINUSE)
+    }
+
+    private func isAvailable(_ port: UInt16) -> Bool {
         let descriptor = socket(AF_INET, SOCK_STREAM, 0)
         guard descriptor >= 0 else {
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EINVAL)
+            return false
         }
         defer {
             close(descriptor)
@@ -8070,30 +8193,20 @@ private extension LocalAPIServerTests {
         var address = sockaddr_in()
         address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
         address.sin_family = sa_family_t(AF_INET)
-        address.sin_port = in_port_t(0).bigEndian
+        address.sin_port = in_port_t(port).bigEndian
         address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
 
-        let bindResult = withUnsafePointer(to: &address) { pointer in
+        return withUnsafePointer(to: &address) { pointer in
             pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { rebound in
                 Darwin.bind(descriptor, rebound, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
-        }
-        guard bindResult == 0 else {
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EINVAL)
-        }
+        } == 0
+    }
+}
 
-        var boundAddress = sockaddr_in()
-        var boundLength = socklen_t(MemoryLayout<sockaddr_in>.size)
-        let nameResult = withUnsafeMutablePointer(to: &boundAddress) { pointer in
-            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { rebound in
-                getsockname(descriptor, rebound, &boundLength)
-            }
-        }
-        guard nameResult == 0 else {
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EINVAL)
-        }
-
-        return UInt16(bigEndian: boundAddress.sin_port)
+private extension LocalAPIServerTests {
+    func unusedTCPPort() throws -> UInt16 {
+        try TestPortAllocator.shared.nextAvailablePort()
     }
 
     func postResponse(port: UInt16, body: String) async throws -> [String: Any] {
