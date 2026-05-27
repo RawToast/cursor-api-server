@@ -449,6 +449,56 @@ describe("Cursor SDK local-agent bridge", () => {
     })).toBe("Invalid value for run_with_env.env.VITE_API_URL: expected at least 1 character(s)");
   });
 
+  it("validates dynamic client MCP object key constraints", () => {
+    const tools = clientMcpToolDefinitions([
+      {
+        name: "configure_env",
+        parameters: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            settings: {
+              type: "object",
+              minProperties: 1,
+              maxProperties: 2,
+              propertyNames: { type: "string", pattern: "^APP_[A-Z0-9_]+$" },
+              patternProperties: {
+                "^APP_SECRET$": false
+              },
+              additionalProperties: { type: "string", minLength: 1 },
+              dependentRequired: {
+                APP_TOKEN: ["APP_URL"]
+              }
+            }
+          },
+          required: ["settings"]
+        }
+      }
+    ]);
+
+    expect(validateClientMcpToolCall(tools, "configure_env", {
+      settings: { APP_URL: "https://example.com", APP_TOKEN: "secret" }
+    })).toBe(null);
+    expect(validateClientMcpToolCall(tools, "configure_env", {
+      settings: {}
+    })).toBe("Invalid value for configure_env.settings: expected at least 1 property");
+    expect(validateClientMcpToolCall(tools, "configure_env", {
+      settings: { APP_URL: "https://example.com", APP_TOKEN: "secret", APP_MODE: "prod" }
+    })).toBe("Invalid value for configure_env.settings: expected at most 2 properties");
+    expect(validateClientMcpToolCall(tools, "configure_env", {
+      settings: { API_URL: "https://example.com" }
+    })).toContain("configure_env.settings property name API_URL");
+    expect(validateClientMcpToolCall(tools, "configure_env", {
+      settings: { APP_TOKEN: "secret" }
+    })).toBe("Missing dependent argument for configure_env.settings: APP_URL");
+    expect(validateClientMcpToolCall(tools, "configure_env", {
+      settings: { APP_SECRET: "secret" }
+    })).toBe("Invalid value for configure_env.settings.APP_SECRET: schema disallows value");
+    expect(validateClientMcpToolCall(tools, "configure_env", {
+      settings: { APP_URL: "" }
+    })).toBe("Invalid value for configure_env.settings.APP_URL: expected at least 1 character(s)");
+  });
+
   it("validates nested dynamic client MCP schemas before accepting forwarding calls", () => {
     const tools = clientMcpToolDefinitions([
       {

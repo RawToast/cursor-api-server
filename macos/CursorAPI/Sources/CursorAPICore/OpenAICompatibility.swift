@@ -3756,6 +3756,12 @@ public enum OpenAICompatibility {
 
     private static func argumentValueSatisfiesSchema(_ value: JSONValue?, schema: JSONValue?, required: Bool) -> Bool {
         guard let value else { return !required }
+        if schema == .bool(true) {
+            return true
+        }
+        if schema == .bool(false) {
+            return false
+        }
         let canonicalSchema = schemaWithInheritedDefinitions(schema, root: schema)
         guard let object = canonicalParameterSchemaObject(canonicalSchema, root: canonicalSchema, depth: 0, seenRefs: []) else {
             return value != .null || !required
@@ -3779,6 +3785,10 @@ public enum OpenAICompatibility {
         }
         let allOf = composedParameterSchemas(object["allOf"])
         if !allOf.isEmpty, !allOf.allSatisfy({ argumentValueSatisfiesSchema(value, schema: schemaWithInheritedDefinitions($0, root: .object(object)), required: true) }) {
+            return false
+        }
+        if let notSchema = object["not"],
+           argumentValueSatisfiesSchema(value, schema: schemaWithInheritedDefinitions(notSchema, root: .object(object)), required: true) {
             return false
         }
         let types = schemaJSONTypes(object)
@@ -3856,7 +3866,12 @@ public enum OpenAICompatibility {
     private static func objectConstraintsApply(_ schema: [String: JSONValue], value: JSONValue, types: [String]) -> Bool {
         guard schema["properties"] != nil
             || schema["patternProperties"] != nil
+            || schema["propertyNames"] != nil
             || schema["required"] != nil
+            || schema["dependentRequired"] != nil
+            || schema["dependentSchemas"] != nil
+            || schema["minProperties"] != nil
+            || schema["maxProperties"] != nil
             || schema["additionalProperties"] != nil else {
             return false
         }
@@ -3868,6 +3883,12 @@ public enum OpenAICompatibility {
 
     private static func objectValueSatisfiesSchema(_ value: JSONValue, schema: [String: JSONValue]) -> Bool {
         guard case .object(let values) = value else { return false }
+        if let minProperties = schema["minProperties"]?.integerValue, values.count < minProperties {
+            return false
+        }
+        if let maxProperties = schema["maxProperties"]?.integerValue, values.count > maxProperties {
+            return false
+        }
         let properties: [String: JSONValue]
         if case .object(let object)? = schema["properties"] {
             properties = object
@@ -3888,7 +3909,29 @@ public enum OpenAICompatibility {
                 return false
             }
         }
+        if case .object(let dependencies)? = schema["dependentRequired"] {
+            for (property, dependencyValue) in dependencies where values[property] != nil {
+                guard case .array(let dependentProperties) = dependencyValue else { continue }
+                for dependentProperty in dependentProperties.compactMap(\.stringValue) where values[dependentProperty] == nil || values[dependentProperty] == .null {
+                    return false
+                }
+            }
+        }
+        if case .object(let dependencies)? = schema["dependentSchemas"] {
+            for (property, dependencySchema) in dependencies where values[property] != nil {
+                let dependentSchema = schemaWithInheritedDefinitions(dependencySchema, root: .object(schema))
+                if !argumentValueSatisfiesSchema(value, schema: dependentSchema, required: true) {
+                    return false
+                }
+            }
+        }
         for (property, nestedValue) in values {
+            if let propertyNameSchema = schema["propertyNames"] {
+                let nestedSchema = schemaWithInheritedDefinitions(propertyNameSchema, root: .object(schema))
+                if !argumentValueSatisfiesSchema(.string(property), schema: nestedSchema, required: true) {
+                    return false
+                }
+            }
             var validated = false
             if let propertyName = propertyName(matching: [property], in: propertyOrder),
                let propertySchema = properties[propertyName] {

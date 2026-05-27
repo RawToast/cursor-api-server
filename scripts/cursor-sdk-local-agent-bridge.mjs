@@ -374,8 +374,12 @@ function validateClientMcpToolCall(tools, toolName, input = {}) {
 }
 
 function validateJsonSchemaValue(value, schema, path, rootSchema = schema, seenRefs = new Set()) {
+  if (schema === true) return null;
+  if (schema === false) return `Invalid value for ${path}: schema disallows value`;
   schema = canonicalJsonSchema(schema);
   const root = canonicalJsonSchema(rootSchema || schema);
+  if (schema === true) return null;
+  if (schema === false) return `Invalid value for ${path}: schema disallows value`;
   if (!schema || typeof schema !== "object" || Array.isArray(schema)) return null;
   const reference = schemaReferenceTarget(schema, root, seenRefs);
   if (reference) return validateJsonSchemaValue(value, reference.schema, path, root, reference.seenRefs);
@@ -400,6 +404,10 @@ function validateJsonSchemaValue(value, schema, path, rootSchema = schema, seenR
     const error = validateJsonSchemaValue(value, candidate, path, root, new Set(seenRefs));
     if (error) return error;
   }
+  if ((isRecord(schema.not) || typeof schema.not === "boolean")
+      && validateJsonSchemaValue(value, schema.not, path, root, new Set(seenRefs)) === null) {
+    return `Invalid value for ${path}: matched disallowed schema`;
+  }
 
   if (value === null && schemaAllowsNull(schema, root, seenRefs)) return null;
 
@@ -412,17 +420,56 @@ function validateJsonSchemaValue(value, schema, path, rootSchema = schema, seenR
   const numberConstraintError = validateNumberConstraints(value, schema, path);
   if (numberConstraintError) return numberConstraintError;
 
-  const objectLike = schema.properties || schema.patternProperties || schema.required || schema.additionalProperties !== undefined || types.includes("object");
+  const objectLike = schema.properties
+    || schema.patternProperties
+    || schema.propertyNames
+    || schema.required
+    || schema.dependentRequired
+    || schema.dependentSchemas
+    || schema.minProperties !== undefined
+    || schema.maxProperties !== undefined
+    || schema.additionalProperties !== undefined
+    || types.includes("object");
   if (objectLike) {
     if (!isRecord(value)) return `Invalid value for ${path}: expected object`;
     const properties = isRecord(schema.properties) ? schema.properties : {};
     const required = Array.isArray(schema.required) ? schema.required.filter((key) => typeof key === "string" && key.trim()) : [];
+    const entries = Object.entries(value);
+    if (Number.isInteger(schema.minProperties) && entries.length < schema.minProperties) {
+      return `Invalid value for ${path}: expected at least ${schema.minProperties} propert${schema.minProperties === 1 ? "y" : "ies"}`;
+    }
+    if (Number.isInteger(schema.maxProperties) && entries.length > schema.maxProperties) {
+      return `Invalid value for ${path}: expected at most ${schema.maxProperties} propert${schema.maxProperties === 1 ? "y" : "ies"}`;
+    }
     for (const key of required) {
       if (!(key in value) || value[key] === undefined || value[key] === null) {
         return `Missing required argument for ${path}: ${key}`;
       }
     }
-    for (const [key, nestedValue] of Object.entries(value)) {
+    if (isRecord(schema.dependentRequired)) {
+      for (const [key, dependencies] of Object.entries(schema.dependentRequired)) {
+        if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+        if (!Array.isArray(dependencies)) continue;
+        for (const dependency of dependencies) {
+          if (typeof dependency !== "string" || !dependency.trim()) continue;
+          if (!(dependency in value) || value[dependency] === undefined || value[dependency] === null) {
+            return `Missing dependent argument for ${path}: ${dependency}`;
+          }
+        }
+      }
+    }
+    if (isRecord(schema.dependentSchemas)) {
+      for (const [key, dependentSchema] of Object.entries(schema.dependentSchemas)) {
+        if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+        const error = validateJsonSchemaValue(value, dependentSchema, path, root, new Set(seenRefs));
+        if (error) return error;
+      }
+    }
+    for (const [key, nestedValue] of entries) {
+      if (isRecord(schema.propertyNames) || typeof schema.propertyNames === "boolean") {
+        const error = validateJsonSchemaValue(key, schema.propertyNames, `${path} property name ${key}`, root, new Set(seenRefs));
+        if (error) return error;
+      }
       let validated = false;
       if (Object.prototype.hasOwnProperty.call(properties, key)) {
         const error = validateJsonSchemaValue(nestedValue, properties[key], `${path}.${key}`, root, new Set(seenRefs));
@@ -498,11 +545,18 @@ function schemaHasStructuralKeyword(schema) {
     "enum",
     "items",
     "maxItems",
+    "maxProperties",
     "minItems",
+    "minProperties",
+    "not",
     "oneOf",
+    "patternProperties",
     "prefixItems",
     "properties",
+    "propertyNames",
     "required",
+    "dependentRequired",
+    "dependentSchemas",
     "type"
   ].some((key) => Object.prototype.hasOwnProperty.call(schema, key));
 }

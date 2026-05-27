@@ -6783,6 +6783,71 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertEqual(env["VITE_API_URL"] as? String, "https://example.com")
     }
 
+    func testChatToolCallsAllowSpecificMCPObjectKeyConstraints() throws {
+        let prepared = try OpenAICompatibility.prepareChatRequest(Data(#"""
+        {
+          "model":"composer-2.5",
+          "messages":[{"role":"user","content":"use mcp"}],
+          "tools":[
+            {
+              "type":"function",
+              "function":{
+                "name":"mcp__runner__configure_env",
+                "parameters":{
+                  "type":"object",
+                  "additionalProperties":false,
+                  "properties":{
+                    "settings":{
+                      "type":"object",
+                      "minProperties":1,
+                      "maxProperties":2,
+                      "propertyNames":{"type":"string","pattern":"^APP_[A-Z0-9_]+$"},
+                      "patternProperties":{
+                        "^APP_SECRET$":false
+                      },
+                      "additionalProperties":{"type":"string","minLength":1},
+                      "dependentRequired":{
+                        "APP_TOKEN":["APP_URL"]
+                      }
+                    }
+                  },
+                  "required":["settings"]
+                }
+              }
+            }
+          ]
+        }
+        """#.utf8))
+        let toolCall = CursorToolCall(name: "mcp", arguments: [
+            "providerIdentifier": .string("runner"),
+            "toolName": .string("configure_env"),
+            "args": .object([
+                "settings": .object([
+                    "APP_URL": .string("https://example.com"),
+                    "APP_TOKEN": .string("secret")
+                ])
+            ])
+        ])
+
+        let object = OpenAICompatibility.chatCompletionResponse(
+            id: "chatcmpl_test",
+            created: 1,
+            prepared: prepared,
+            output: CursorSDKOutput(text: "", toolCalls: [toolCall], agentID: "agent-test", runID: "run-test")
+        )
+
+        let choices = try XCTUnwrap(object["choices"] as? [[String: Any]])
+        let message = try XCTUnwrap(choices.first?["message"] as? [String: Any])
+        let toolCalls = try XCTUnwrap(message["tool_calls"] as? [[String: Any]])
+        let function = try XCTUnwrap(toolCalls.first?["function"] as? [String: Any])
+        let arguments = try decodedArguments(function)
+        let settings = try XCTUnwrap(arguments["settings"] as? [String: Any])
+
+        XCTAssertEqual(function["name"] as? String, "mcp__runner__configure_env")
+        XCTAssertEqual(settings["APP_URL"] as? String, "https://example.com")
+        XCTAssertEqual(settings["APP_TOKEN"] as? String, "secret")
+    }
+
     func testChatToolCallsDoNotEmitWrapperMCPCallsWithSchemaInvalidNestedInput() throws {
         let prepared = try OpenAICompatibility.prepareChatRequest(Data(#"""
         {
@@ -7963,6 +8028,109 @@ final class LocalAPIServerTests: XCTestCase {
 
         let object = OpenAICompatibility.responseObject(
             id: "resp_mcp_pattern_invalid",
+            created: 1,
+            prepared: prepared,
+            output: CursorSDKOutput(text: "", toolCalls: [toolCall], agentID: "agent-test", runID: "run-test")
+        )
+
+        let outputItems = try XCTUnwrap(object["output"] as? [[String: Any]])
+        XCTAssertNil(outputItems.first { ($0["type"] as? String) == "function_call" })
+    }
+
+    func testResponsesFunctionCallsDoNotEmitProviderSpecificMCPToolViolatingObjectKeyConstraints() throws {
+        let prepared = try OpenAICompatibility.prepareResponsesRequest(Data(#"""
+        {
+          "model":"composer-2.5",
+          "input":"configure env",
+          "tools":[
+            {
+              "type":"function",
+              "name":"mcp__runner__configure_env",
+              "parameters":{
+                "type":"object",
+                "additionalProperties":false,
+                "properties":{
+                  "settings":{
+                    "type":"object",
+                    "minProperties":1,
+                    "maxProperties":2,
+                    "propertyNames":{"type":"string","pattern":"^APP_[A-Z0-9_]+$"},
+                    "patternProperties":{
+                      "^APP_SECRET$":false
+                    },
+                    "additionalProperties":{"type":"string","minLength":1},
+                    "dependentRequired":{
+                      "APP_TOKEN":["APP_URL"]
+                    }
+                  }
+                },
+                "required":["settings"]
+              }
+            }
+          ]
+        }
+        """#.utf8))
+        let toolCall = CursorToolCall(name: "mcp", arguments: [
+            "providerIdentifier": .string("runner"),
+            "toolName": .string("configure_env"),
+            "args": .object([
+                "settings": .object([
+                    "APP_TOKEN": .string("secret")
+                ])
+            ])
+        ])
+
+        let object = OpenAICompatibility.responseObject(
+            id: "resp_mcp_object_constraints_invalid",
+            created: 1,
+            prepared: prepared,
+            output: CursorSDKOutput(text: "", toolCalls: [toolCall], agentID: "agent-test", runID: "run-test")
+        )
+
+        let outputItems = try XCTUnwrap(object["output"] as? [[String: Any]])
+        XCTAssertNil(outputItems.first { ($0["type"] as? String) == "function_call" })
+    }
+
+    func testResponsesFunctionCallsDoNotEmitProviderSpecificMCPToolWithForbiddenPatternProperty() throws {
+        let prepared = try OpenAICompatibility.prepareResponsesRequest(Data(#"""
+        {
+          "model":"composer-2.5",
+          "input":"configure env",
+          "tools":[
+            {
+              "type":"function",
+              "name":"mcp__runner__configure_env",
+              "parameters":{
+                "type":"object",
+                "additionalProperties":false,
+                "properties":{
+                  "settings":{
+                    "type":"object",
+                    "propertyNames":{"type":"string","pattern":"^APP_[A-Z0-9_]+$"},
+                    "patternProperties":{
+                      "^APP_SECRET$":false
+                    },
+                    "additionalProperties":{"type":"string","minLength":1}
+                  }
+                },
+                "required":["settings"]
+              }
+            }
+          ]
+        }
+        """#.utf8))
+        let toolCall = CursorToolCall(name: "mcp", arguments: [
+            "providerIdentifier": .string("runner"),
+            "toolName": .string("configure_env"),
+            "args": .object([
+                "settings": .object([
+                    "APP_SECRET": .string("secret")
+                ])
+            ])
+        ])
+
+        let object = OpenAICompatibility.responseObject(
+            id: "resp_mcp_forbidden_pattern_invalid",
             created: 1,
             prepared: prepared,
             output: CursorSDKOutput(text: "", toolCalls: [toolCall], agentID: "agent-test", runID: "run-test")
