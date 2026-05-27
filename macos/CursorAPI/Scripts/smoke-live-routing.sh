@@ -464,6 +464,43 @@ JSON
   fi
   echo "Verified live OpenCode glob tool schema through API for Cursor."
 
+  webfetch_project="$(mktemp -d "${TMPDIR:-/tmp}/api-for-cursor-live-opencode-webfetch-project.XXXXXX")"
+  webfetch_output="$(mktemp "${TMPDIR:-/tmp}/api-for-cursor-live-opencode-webfetch-run.XXXXXX")"
+  TEMP_DIRS+=("$webfetch_project")
+  TEMP_FILES+=("$webfetch_output")
+  (
+    cd "$webfetch_project"
+    HOME="$temp_home" XDG_CONFIG_HOME="$temp_config" \
+      opencode --pure run --agent build --model cursorapi/composer-2.5-fast --format json --dangerously-skip-permissions \
+        "Use the webfetch tool, not bash, to fetch https://example.com. Do not use bash."
+  ) >"$webfetch_output" 2>&1 &
+  webfetch_pid=$!
+  deadline=$((SECONDS + TIMEOUT_SECONDS))
+  webfetch_verified=0
+  while kill -0 "$webfetch_pid" >/dev/null 2>&1; do
+    if grep -F '"tool":"webfetch"' "$webfetch_output" >/dev/null \
+      && grep -F "Example Domain" "$webfetch_output" >/dev/null \
+      && ! grep -E '"tool":"bash"|SchemaError|Invalid tool|tool_use_error|NoSuchTool' "$webfetch_output" >/dev/null; then
+      webfetch_verified=1
+      kill "$webfetch_pid" >/dev/null 2>&1 || true
+      wait "$webfetch_pid" >/dev/null 2>&1 || true
+      break
+    fi
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      kill "$webfetch_pid" >/dev/null 2>&1 || true
+      wait "$webfetch_pid" >/dev/null 2>&1 || true
+      tail -80 "$webfetch_output"
+      fail "OpenCode live webfetch run did not finish before timeout"
+    fi
+    sleep 0.5
+  done
+  wait "$webfetch_pid" >/dev/null 2>&1 || true
+  if [ "$webfetch_verified" -ne 1 ]; then
+    tail -80 "$webfetch_output"
+    fail "OpenCode did not execute a valid live non-builtin webfetch tool round trip"
+  fi
+  echo "Verified live OpenCode non-builtin webfetch tool through API for Cursor."
+
   session="api-for-cursor-live-opencode-$$"
   marker="AFC_TOOL_DONE_$$"
   tool_file="opencode_live_tool_smoke.txt"
