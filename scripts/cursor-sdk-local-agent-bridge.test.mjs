@@ -138,6 +138,27 @@ describe("Cursor SDK local-agent bridge", () => {
     expect(isForwardableSDKToolCall(normalized)).toBe(true);
   });
 
+  it("normalizes local client MCP forwarding tools with direct payload fields", () => {
+    const normalized = normalizeSDKToolCall({
+      type: "mcp",
+      args: {
+        providerIdentifier: "client",
+        toolName: "client_glob",
+        targetDirectory: "src",
+        globPattern: "**/*.tsx"
+      }
+    });
+
+    expect(normalized).toEqual({
+      name: "glob",
+      arguments: {
+        targetDirectory: "src",
+        globPattern: "**/*.tsx"
+      }
+    });
+    expect(isForwardableSDKToolCall(normalized)).toBe(true);
+  });
+
   it("keeps dynamic harness MCP tools as client MCP calls", () => {
     const normalized = normalizeSDKToolCall({
       type: "mcp",
@@ -148,6 +169,31 @@ describe("Cursor SDK local-agent bridge", () => {
           file_path: "marker.txt",
           contents: "ok"
         }
+      }
+    });
+
+    expect(normalized).toEqual({
+      name: "mcp",
+      arguments: {
+        providerIdentifier: "client",
+        toolName: "probe_write_file",
+        args: {
+          file_path: "marker.txt",
+          contents: "ok"
+        }
+      }
+    });
+    expect(isForwardableSDKToolCall(normalized)).toBe(true);
+  });
+
+  it("keeps dynamic harness MCP tools with direct payload fields as client MCP calls", () => {
+    const normalized = normalizeSDKToolCall({
+      type: "mcp",
+      args: {
+        providerIdentifier: "client",
+        toolName: "probe_write_file",
+        file_path: "marker.txt",
+        contents: "ok"
       }
     });
 

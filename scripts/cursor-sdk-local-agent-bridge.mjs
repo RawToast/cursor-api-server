@@ -775,7 +775,7 @@ function normalizeClientMcpToolCall(name, args) {
   if (provider && provider !== clientMcpServerName) return null;
   const toolName = firstString(args, "toolName", "tool_name", "tool", "name");
   const sdkName = sdkToolNameFromClientMcpTool(toolName);
-  const payload = objectArgumentFrom(args, "args", "arguments", "input", "parameters", "params", "payload", "data");
+  const payload = clientMcpPayloadArguments(args);
   if (!sdkName) {
     return {
       name: "mcp",
@@ -915,6 +915,18 @@ function firstString(args, ...keys) {
   return "";
 }
 
+function firstMatchingKey(source, ...keys) {
+  if (!isRecord(source)) return "";
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(source, key)) return key;
+  }
+  const normalizedKeys = new Set(keys.map(normalizeToolName));
+  for (const key of Object.keys(source)) {
+    if (normalizedKeys.has(normalizeToolName(key))) return key;
+  }
+  return "";
+}
+
 function hasStringAllowEmpty(args, ...keys) {
   return keys.some((key) => typeof args[key] === "string");
 }
@@ -952,6 +964,42 @@ function objectArgumentFrom(source, ...keys) {
     }
   }
   return {};
+}
+
+function objectArgumentEntryFrom(source, ...keys) {
+  if (!isRecord(source)) return null;
+  for (const key of keys) {
+    const value = source[key];
+    if (isRecord(value)) return { key, value };
+    if (typeof value === "string") {
+      const parsed = parseJsonObject(value);
+      if (parsed) return { key, value: parsed };
+    }
+  }
+  const normalizedKeys = new Set(keys.map(normalizeToolName));
+  for (const [key, value] of Object.entries(source)) {
+    if (!normalizedKeys.has(normalizeToolName(key))) continue;
+    if (isRecord(value)) return { key, value };
+    if (typeof value === "string") {
+      const parsed = parseJsonObject(value);
+      if (parsed) return { key, value: parsed };
+    }
+  }
+  return null;
+}
+
+function clientMcpPayloadArguments(args) {
+  const envelope = objectArgumentEntryFrom(args, "args", "arguments", "input", "parameters", "params", "payload", "data");
+  if (envelope && Object.keys(envelope.value).length > 0) return envelope.value;
+  if (!isRecord(args)) return {};
+  const providerKey = firstMatchingKey(args, "providerIdentifier", "provider", "server", "serverName", "server_name");
+  const toolKey = firstMatchingKey(args, "toolName", "tool_name", "tool", "name");
+  const output = {};
+  for (const [key, value] of Object.entries(args)) {
+    if (key === providerKey || key === toolKey || key === envelope?.key) continue;
+    output[key] = value;
+  }
+  return output;
 }
 
 function parseJsonObject(value) {
