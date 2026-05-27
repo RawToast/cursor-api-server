@@ -48,6 +48,12 @@ public struct LocalCursorSDKHarness: CursorSDKHarness {
 
     public init() {}
 
+    private struct BridgeRunResult {
+        var output: CursorSDKOutput
+        var emittedText: String
+        var emittedToolCalls: [CursorToolCall]
+    }
+
     public func validate(settings: CursorAPISettings, authorization: String?) throws {
         let apiKey = try Self.resolvedCursorAPIKeyForRequest(from: authorization, settings: settings)
         guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -188,17 +194,27 @@ public struct LocalCursorSDKHarness: CursorSDKHarness {
         settings: CursorAPISettings,
         onEvent: @escaping @Sendable (CursorSDKStreamEvent) -> Void
     ) async throws -> CursorSDKOutput {
-        let output = try await runSDKBridgeRequestWithTransportRetry(
+        let result = try await runSDKBridgeRequestWithTransportRetry(
             apiKey: apiKey,
             agentID: agentID,
             runID: runID,
             prepared: prepared,
-            settings: settings
+            settings: settings,
+            onEvent: onEvent
         )
+        let output = result.output
         for toolCall in output.toolCalls {
+            guard !result.emittedToolCalls.contains(toolCall) else { continue }
             onEvent(.toolCall(toolCall))
         }
-        if output.toolCalls.isEmpty, !output.text.isEmpty {
+        if output.toolCalls.isEmpty,
+           output.text.count > result.emittedText.count,
+           output.text.hasPrefix(result.emittedText) {
+            let suffix = String(output.text.dropFirst(result.emittedText.count))
+            if !suffix.isEmpty {
+                onEvent(.text(suffix))
+            }
+        } else if output.toolCalls.isEmpty, result.emittedText.isEmpty, !output.text.isEmpty {
             onEvent(.text(output.text))
         }
         return output
@@ -209,21 +225,29 @@ public struct LocalCursorSDKHarness: CursorSDKHarness {
         agentID: String,
         runID: String,
         prepared: PreparedChatRequest,
-        settings: CursorAPISettings
-    ) async throws -> CursorSDKOutput {
+        settings: CursorAPISettings,
+        onEvent: @escaping @Sendable (CursorSDKStreamEvent) -> Void
+    ) async throws -> BridgeRunResult {
         var lastError: (any Error)?
         for attempt in 1...Self.bridgeTransportAttempts {
+            let emittedDuringAttempt = LockedFlag()
             do {
                 return try await runActualSDKBridgeRequest(
                     apiKey: apiKey,
                     agentID: agentID,
                     runID: attempt == 1 ? runID : Self.newRunID(),
                     prepared: prepared,
-                    settings: settings
+                    settings: settings,
+                    onEvent: { event in
+                        emittedDuringAttempt.set()
+                        onEvent(event)
+                    }
                 )
             } catch {
                 lastError = error
-                guard attempt < Self.bridgeTransportAttempts, isRetryableBridgeTransportError(error) else {
+                guard attempt < Self.bridgeTransportAttempts,
+                      !emittedDuringAttempt.value(),
+                      isRetryableBridgeTransportError(error) else {
                     throw error
                 }
                 try? await Task.sleep(nanoseconds: 150_000_000)
@@ -237,8 +261,9 @@ public struct LocalCursorSDKHarness: CursorSDKHarness {
         agentID: String,
         runID: String,
         prepared: PreparedChatRequest,
-        settings: CursorAPISettings
-    ) async throws -> CursorSDKOutput {
+        settings: CursorAPISettings,
+        onEvent: @escaping @Sendable (CursorSDKStreamEvent) -> Void
+    ) async throws -> BridgeRunResult {
         let bridge = try await CursorSDKBridgeServer.shared.endpoint(settings: settings)
         var request = URLRequest(url: bridge.url)
         request.httpMethod = "POST"
@@ -252,13 +277,14 @@ public struct LocalCursorSDKHarness: CursorSDKHarness {
             "prompt": prepared.prompt,
             "sessionKey": prepared.sessionKey ?? agentID,
             "workingDirectory": prepared.toolContext?.workingDirectory ?? "",
+            "streamEvents": true,
             "tools": Self.bridgeToolObjects(prepared.tools)
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.withoutEscapingSlashes])
-        let data: Data
+        let bytes: URLSession.AsyncBytes
         let response: URLResponse
         do {
-            (data, response) = try await URLSession.shared.data(for: request)
+            (bytes, response) = try await URLSession.shared.bytes(for: request)
         } catch {
             throw CursorAPIError.transport("Cursor SDK bridge request failed: \(error.localizedDescription)")
         }
@@ -266,21 +292,112 @@ public struct LocalCursorSDKHarness: CursorSDKHarness {
             throw CursorAPIError.transport("Cursor SDK bridge did not return an HTTP response.")
         }
         guard (200..<300).contains(http.statusCode) else {
+            let data = try await collectData(bytes)
             let text = String(data: data, encoding: .utf8) ?? "status \(http.statusCode)"
             throw http.statusCode == 401 ? CursorAPIError.unauthorized : CursorAPIError.upstream(text)
         }
-        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw CursorAPIError.transport("Cursor SDK bridge returned invalid JSON.")
+        var emittedText = ""
+        var emittedToolCalls: [CursorToolCall] = []
+        var finalOutput: CursorSDKOutput?
+        var line = Data()
+        for try await byte in bytes {
+            if byte == 10 {
+                try handleBridgeEventLine(
+                    line,
+                    agentID: agentID,
+                    runID: runID,
+                    emittedText: &emittedText,
+                    emittedToolCalls: &emittedToolCalls,
+                    finalOutput: &finalOutput,
+                    onEvent: onEvent
+                )
+                line.removeAll(keepingCapacity: true)
+            } else if byte != 13 {
+                line.append(byte)
+            }
         }
+        if !line.isEmpty {
+            try handleBridgeEventLine(
+                line,
+                agentID: agentID,
+                runID: runID,
+                emittedText: &emittedText,
+                emittedToolCalls: &emittedToolCalls,
+                finalOutput: &finalOutput,
+                onEvent: onEvent
+            )
+        }
+        if finalOutput == nil, !emittedToolCalls.isEmpty {
+            finalOutput = CursorSDKOutput(text: "", toolCalls: emittedToolCalls, agentID: agentID, runID: runID)
+        }
+        guard let finalOutput else {
+            throw CursorAPIError.transport("Cursor SDK bridge stream ended without a final output.")
+        }
+        return BridgeRunResult(output: finalOutput, emittedText: emittedText, emittedToolCalls: emittedToolCalls)
+    }
+
+    private func collectData(_ bytes: URLSession.AsyncBytes) async throws -> Data {
+        var data = Data()
+        for try await byte in bytes {
+            data.append(byte)
+        }
+        return data
+    }
+
+    private func handleBridgeEventLine(
+        _ line: Data,
+        agentID: String,
+        runID: String,
+        emittedText: inout String,
+        emittedToolCalls: inout [CursorToolCall],
+        finalOutput: inout CursorSDKOutput?,
+        onEvent: @escaping @Sendable (CursorSDKStreamEvent) -> Void
+    ) throws {
+        guard !line.isEmpty else { return }
+        guard let object = try JSONSerialization.jsonObject(with: line) as? [String: Any],
+              let type = object["type"] as? String else {
+            throw CursorAPIError.transport("Cursor SDK bridge returned an invalid stream event.")
+        }
+
+        switch type {
+        case "text":
+            guard let text = object["text"] as? String else { return }
+            emittedText += text
+            onEvent(.text(text))
+        case "tool_call":
+            guard let toolCall = bridgeToolCall(from: object["toolCall"]) else { return }
+            emittedToolCalls.append(toolCall)
+            onEvent(.toolCall(toolCall))
+        case "done":
+            guard let output = bridgeOutput(from: object["output"], agentID: agentID, runID: runID) else {
+                throw CursorAPIError.transport("Cursor SDK bridge returned an invalid final output.")
+            }
+            finalOutput = output
+        case "error":
+            let error = object["error"] as? [String: Any]
+            let message = error?["message"] as? String ?? "Cursor SDK bridge stream failed."
+            throw CursorAPIError.upstream(message)
+        default:
+            break
+        }
+    }
+
+    private func bridgeOutput(from value: Any?, agentID: String, runID: String) -> CursorSDKOutput? {
+        guard let object = value as? [String: Any] else { return nil }
         let text = object["text"] as? String ?? ""
         let bridgeAgentID = object["agentID"] as? String ?? agentID
         let bridgeRunID = object["runID"] as? String ?? runID
-        let toolCalls = (object["toolCalls"] as? [[String: Any]] ?? []).compactMap { item -> CursorToolCall? in
-            guard let name = item["name"] as? String else { return nil }
-            let arguments = (item["arguments"] as? [String: Any] ?? [:]).mapValues(JSONValue.from)
-            return CursorToolCall(name: name, arguments: arguments)
-        }
+        let toolCalls = (object["toolCalls"] as? [[String: Any]] ?? []).compactMap { bridgeToolCall(from: $0) }
         return CursorSDKOutput(text: text, toolCalls: toolCalls, agentID: bridgeAgentID, runID: bridgeRunID)
+    }
+
+    private func bridgeToolCall(from value: Any?) -> CursorToolCall? {
+        guard let object = value as? [String: Any],
+              let name = object["name"] as? String else {
+            return nil
+        }
+        let arguments = (object["arguments"] as? [String: Any] ?? [:]).mapValues(JSONValue.from)
+        return CursorToolCall(name: name, arguments: arguments)
     }
 
     private func isRetryableBridgeTransportError(_ error: any Error) -> Bool {
@@ -510,6 +627,23 @@ private final class LockedEventBuffer: @unchecked Sendable {
     }
 
     func events() -> [CursorSDKStreamEvent] {
+        lock.withLock {
+            storage
+        }
+    }
+}
+
+private final class LockedFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = false
+
+    func set() {
+        lock.withLock {
+            storage = true
+        }
+    }
+
+    func value() -> Bool {
         lock.withLock {
             storage
         }

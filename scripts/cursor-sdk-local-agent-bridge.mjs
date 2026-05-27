@@ -78,8 +78,9 @@ async function handleRequest(request, response) {
   const workingDirectory = sdkWorkingDirectory(body.workingDirectory);
   const requestId = typeof body.requestId === "string" && body.requestId ? body.requestId : crypto.randomUUID();
   const clientTools = parseClientTools(body.tools);
+  const streamEvents = body.streamEvents === true;
 
-  const output = await runLocalAgent({
+  const input = {
     apiKey,
     model,
     prompt: bridgePrompt(prompt),
@@ -87,16 +88,54 @@ async function handleRequest(request, response) {
     workingDirectory,
     requestId,
     clientTools
-  });
+  };
+
+  if (streamEvents) {
+    await streamLocalAgent(input, response);
+    return;
+  }
+
+  const output = await runLocalAgent(input);
   writeJson(response, output);
 }
 
-async function runLocalAgent(input) {
+async function streamLocalAgent(input, response) {
+  let closed = false;
+  const markClosed = () => {
+    closed = true;
+  };
+  response.on("close", markClosed);
+  response.on("error", markClosed);
+  response.socket?.on?.("error", markClosed);
+  response.writeHead(200, {
+    "Content-Type": "application/x-ndjson; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    "Access-Control-Allow-Origin": "*"
+  });
+  const emit = (event) => {
+    if (closed) return false;
+    const wrote = writeNdjson(response, event);
+    if (!wrote) closed = true;
+    return wrote;
+  };
+  try {
+    const output = await runLocalAgent(input, emit);
+    emit({ type: "done", output });
+  } catch (error) {
+    emit({ type: "error", error: openAiError(error).error });
+  } finally {
+    if (!response.writableEnded && !response.destroyed) {
+      response.end();
+    }
+  }
+}
+
+async function runLocalAgent(input, onEvent) {
   let activeRun = null;
   let timer = null;
   const work = runLocalAgentBody(input, (run) => {
     activeRun = run;
-  });
+  }, onEvent);
   const timeout = new Promise((_resolve, reject) => {
     timer = setTimeout(() => {
       const error = new HttpError("Cursor SDK bridge run timed out.", 504, "cursor_sdk_timeout");
@@ -114,7 +153,7 @@ async function runLocalAgent(input) {
   }
 }
 
-async function runLocalAgentBody(input, onRun) {
+async function runLocalAgentBody(input, onRun, onEvent) {
   const agent = await getAgent(input);
   let run;
   let capturedToolCall = null;
@@ -126,6 +165,7 @@ async function runLocalAgentBody(input, onRun) {
     const normalized = normalizeSDKToolCall(toolCall);
     if (!normalized || !isForwardableSDKToolCall(normalized)) return;
     capturedToolCall = normalized;
+    if (onEvent) onEvent({ type: "tool_call", toolCall: capturedToolCall });
     cancelRequested = true;
     if (run) {
       try {
@@ -157,7 +197,10 @@ async function runLocalAgentBody(input, onRun) {
   for await (const event of run.stream()) {
     if (event.type === "assistant") {
       for (const block of event.message?.content ?? []) {
-        if (block?.type === "text" && typeof block.text === "string") text += block.text;
+        if (block?.type === "text" && typeof block.text === "string") {
+          text += block.text;
+          if (onEvent && block.text) onEvent({ type: "text", text: block.text });
+        }
       }
       continue;
     }
@@ -734,6 +777,19 @@ function writeJson(response, body, status = 200) {
     "Access-Control-Allow-Origin": "*"
   });
   response.end(data);
+}
+
+function writeNdjson(response, body) {
+  if (response.writableEnded || response.destroyed) return false;
+  try {
+    response.write(`${JSON.stringify(body)}\n`);
+    return true;
+  } catch (error) {
+    if (error?.code === "EPIPE" || error?.code === "ERR_STREAM_DESTROYED") {
+      return false;
+    }
+    throw error;
+  }
 }
 
 function openAiError(error) {
