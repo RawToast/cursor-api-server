@@ -22,8 +22,10 @@ const maxRunRetries = parseInteger(process.env.CURSOR_SDK_BRIDGE_MAX_RUN_RETRIES
 const retryBaseDelayMs = parseInteger(process.env.CURSOR_SDK_BRIDGE_RETRY_BASE_DELAY_MS, 500);
 const defaultCwd = process.env.CURSOR_SDK_WORKING_DIRECTORY || process.cwd();
 const clientMcpServerName = "client";
+const clientToolCallbackPath = "/client-tool-call";
 
 const agentCache = new Map();
+const activeClientToolCaptures = new Map();
 let server = null;
 
 if (isMainModule()) {
@@ -42,6 +44,7 @@ export {
   isForwardableSDKToolCall,
   isRetryableSDKRunError,
   normalizeSDKToolCall,
+  normalizeModel,
   sdkRunFailureSummary,
   startServer,
   validateClientMcpToolCall,
@@ -66,6 +69,11 @@ async function handleRequest(request, response) {
 
   if (request.method === "GET" && url.pathname === "/health") {
     writeJson(response, { ok: true, agents: agentCache.size });
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === clientToolCallbackPath) {
+    await handleClientToolCallback(request, response);
     return;
   }
 
@@ -106,6 +114,20 @@ async function handleRequest(request, response) {
 
   const output = await runLocalAgent(input);
   writeJson(response, output);
+}
+
+async function handleClientToolCallback(request, response) {
+  if (bridgeToken && bearerToken(request) !== bridgeToken) {
+    writeJson(response, openAiError(new HttpError("Invalid bridge token", 401, "unauthorized")), 401);
+    return;
+  }
+
+  const body = await readJsonBody(request);
+  const cacheKey = requiredString(body.cacheKey, "cacheKey");
+  const toolName = requiredString(body.toolName, "toolName");
+  const args = isRecord(body.arguments) ? body.arguments : {};
+  const accepted = await captureActiveClientToolCall(cacheKey, { type: toolName, args });
+  writeJson(response, { ok: true, accepted });
 }
 
 async function streamLocalAgent(input, response) {
@@ -184,14 +206,14 @@ async function runLocalAgent(input, onEvent) {
 }
 
 async function runLocalAgentBody(input, onRun, onEvent) {
-  const agentEntry = await getAgent(input);
-  const agent = agentEntry.agent;
+  const cacheKey = agentCacheKey(input);
+  let agentEntry = null;
   let run;
   let capturedToolCall = null;
   let cancelRequested = false;
   let text = "";
 
-  const captureToolCall = async (toolCall) => {
+  const captureToolCall = async (toolCall, options = {}) => {
     if (capturedToolCall || !toolCall) return;
     const normalized = normalizeSDKToolCall(toolCall, input.clientTools);
     if (!normalized || !isForwardableSDKToolCall(normalized, input.clientTools)) return;
@@ -199,32 +221,40 @@ async function runLocalAgentBody(input, onRun, onEvent) {
     if (onEvent) onEvent({ type: "tool_call", toolCall: capturedToolCall });
     cancelRequested = true;
     if (run) {
-      try {
-        await run.cancel();
-      } catch {
+      const cancellation = run.cancel().catch(() => {
         // The SDK may already be finishing the local run. The captured model
         // tool call is still the response we need to return to the client.
+      });
+      if (options.waitForCancel !== false) {
+        await cancellation;
       }
     }
   };
 
-  run = await agent.send(input.prompt, {
-    ...localAgentSendOptions(input),
-    idempotencyKey: input.requestId,
-    onDelta: async ({ update }) => {
-      const toolCall = toolCallFromDelta(update);
-      if (toolCall) await captureToolCall(toolCall);
-    }
+  const unregisterCapture = registerActiveClientToolCapture(cacheKey, async (toolCall) => {
+    await captureToolCall(toolCall, { waitForCancel: false });
+    return capturedToolCall !== null;
   });
-  onRun(run);
-
-  if (cancelRequested) {
-    try {
-      await run.cancel();
-    } catch {}
-  }
-
   try {
+    agentEntry = await getAgent(input);
+    const agent = agentEntry.agent;
+
+    run = await agent.send(input.prompt, {
+      ...localAgentSendOptions(input),
+      idempotencyKey: input.requestId,
+      onDelta: async ({ update }) => {
+        const toolCall = toolCallFromDelta(update);
+        if (toolCall) await captureToolCall(toolCall);
+      }
+    });
+    onRun(run);
+
+    if (cancelRequested) {
+      try {
+        await run.cancel();
+      } catch {}
+    }
+
     for await (const event of run.stream()) {
       if (event.type === "assistant") {
         for (const block of event.message?.content ?? []) {
@@ -244,29 +274,31 @@ async function runLocalAgentBody(input, onRun, onEvent) {
     if (!capturedToolCall && !(cancelRequested && isBenignCancellationError(error))) {
       throw error;
     }
+  } finally {
+    unregisterCapture();
   }
 
   if (capturedToolCall) {
-    evictAgent(agentEntry.cacheKey, agent);
+    if (agentEntry) evictAgent(agentEntry.cacheKey, agentEntry.agent);
     return {
       text: "",
       toolCalls: [capturedToolCall],
-      agentID: agent.agentId,
-      runID: run.id,
+      agentID: agentEntry?.agent.agentId || "",
+      runID: run?.id || input.requestId,
       status: "tool_call"
     };
   }
 
   const result = await run.wait();
   if (result.status === "error") {
-    evictAgent(agentEntry.cacheKey, agent);
+    if (agentEntry) evictAgent(agentEntry.cacheKey, agentEntry.agent);
     throw sdkRunFailureError(result);
   }
   if (!text && typeof result.result === "string") text = result.result;
   return {
     text: stripFinalMarker(text),
     toolCalls: [],
-    agentID: agent.agentId,
+    agentID: agentEntry?.agent.agentId || "",
     runID: run.id,
     status: result.status
   };
@@ -302,12 +334,33 @@ function evictCachedAgent(input) {
   if (cached) evictAgent(cacheKey, cached.agent);
 }
 
+function registerActiveClientToolCapture(cacheKey, handler) {
+  if (!activeClientToolCaptures.has(cacheKey)) {
+    activeClientToolCaptures.set(cacheKey, new Set());
+  }
+  const handlers = activeClientToolCaptures.get(cacheKey);
+  handlers.add(handler);
+  return () => {
+    handlers.delete(handler);
+    if (handlers.size === 0) activeClientToolCaptures.delete(cacheKey);
+  };
+}
+
+async function captureActiveClientToolCall(cacheKey, toolCall) {
+  const handlers = activeClientToolCaptures.get(cacheKey);
+  if (!handlers || handlers.size === 0) return false;
+  for (const handler of [...handlers]) {
+    if (await handler(toolCall)) return true;
+  }
+  return false;
+}
+
 function localAgentCreateOptions(input) {
   return {
     apiKey: input.apiKey,
     model: { id: input.model },
     name: "API for Cursor local bridge",
-    mcpServers: clientForwardingMcpServers(input.clientTools),
+    mcpServers: clientForwardingMcpServers(input.clientTools, agentCacheKey(input)),
     local: {
       cwd: input.workingDirectory
     }
@@ -320,12 +373,17 @@ function localAgentSendOptions(input) {
   };
 }
 
-function clientForwardingMcpServers(clientTools = []) {
+function clientForwardingMcpServers(clientTools = [], cacheKey = "") {
   return {
     [clientMcpServerName]: {
       type: "stdio",
       command: process.execPath,
-      args: ["-e", clientForwardingMcpServerSource(clientTools)]
+      args: ["-e", clientForwardingMcpServerSource(clientTools)],
+      env: {
+        CURSOR_SDK_BRIDGE_CALLBACK_URL: `http://${host}:${port}${clientToolCallbackPath}`,
+        CURSOR_SDK_BRIDGE_CALLBACK_TOKEN: bridgeToken,
+        CURSOR_SDK_BRIDGE_AGENT_CACHE_KEY: cacheKey
+      }
     }
   };
 }
@@ -335,6 +393,9 @@ function clientForwardingMcpServerSource(clientTools = []) {
   return `
 const readline = require("node:readline");
 const tools = ${tools};
+const callbackUrl = process.env.CURSOR_SDK_BRIDGE_CALLBACK_URL || "";
+const callbackToken = process.env.CURSOR_SDK_BRIDGE_CALLBACK_TOKEN || "";
+const callbackCacheKey = process.env.CURSOR_SDK_BRIDGE_AGENT_CACHE_KEY || "";
 const validateClientMcpToolCall = ${validateClientMcpToolCall.toString()};
 const validateJsonSchemaValue = ${validateJsonSchemaValue.toString()};
 const canonicalJsonSchema = ${canonicalJsonSchema.toString()};
@@ -381,7 +442,33 @@ function sendError(id, message) {
   if (id === undefined || id === null) return;
   writeStdout(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32000, message } }) + "\\n");
 }
-rl.on("line", (line) => {
+async function notifyParentToolCall(toolName, input) {
+  if (!callbackUrl || !callbackCacheKey) return true;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 1500);
+  try {
+    const headers = { "Content-Type": "application/json" };
+    if (callbackToken) headers.Authorization = "Bearer " + callbackToken;
+    const response = await fetch(callbackUrl, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        cacheKey: callbackCacheKey,
+        toolName,
+        arguments: input && typeof input === "object" && !Array.isArray(input) ? input : {}
+      }),
+      signal: controller.signal
+    });
+    if (!response.ok) return false;
+    const body = await response.json().catch(() => ({}));
+    return body && body.accepted === true;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+rl.on("line", async (line) => {
   if (!line.trim()) return;
   let message;
   try {
@@ -405,6 +492,11 @@ rl.on("line", (line) => {
     const validationError = validateClientMcpToolCall(tools, toolName, input);
     if (validationError) {
       sendError(message.id, validationError);
+      return;
+    }
+    const accepted = await notifyParentToolCall(toolName, input);
+    if (!accepted) {
+      sendError(message.id, "Outer client callback unavailable for forwarded tool call.");
       return;
     }
     send(message.id, {
@@ -1584,9 +1676,10 @@ function evictAgents() {
 
 function normalizeModel(model) {
   const normalized = model.trim().toLowerCase();
-  if (!normalized || normalized === "default" || normalized === "auto") return "composer-2.5";
-  if (normalized === "composer-2.5-sdk" || normalized === "composer-2-5-sdk") return "composer-2.5";
-  if (normalized === "composer-2.5-fast" || normalized === "composer-2-5-fast") return "composer-2.5";
+  if (!normalized || normalized === "default" || normalized === "auto") return "default";
+  if (normalized === "composer-latest" || normalized === "composer" || normalized === "composer-2.5" || normalized === "composer-2-5") return "default";
+  if (normalized === "composer-2.5-sdk" || normalized === "composer-2-5-sdk") return "default";
+  if (normalized === "composer-2.5-fast" || normalized === "composer-2-5-fast") return "default";
   return model.trim();
 }
 

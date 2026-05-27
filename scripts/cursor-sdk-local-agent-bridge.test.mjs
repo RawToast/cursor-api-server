@@ -8,6 +8,7 @@ import {
   localAgentSendOptions,
   isForwardableSDKToolCall,
   isRetryableSDKRunError,
+  normalizeModel,
   normalizeSDKToolCall,
   sdkRunFailureSummary,
   toolCallFromDelta,
@@ -39,6 +40,14 @@ describe("Cursor SDK local-agent bridge", () => {
       code: "unauthorized",
       retryable: false
     });
+  });
+
+  it("routes public Composer aliases through the SDK default model selector", () => {
+    expect(normalizeModel("composer-2.5")).toBe("default");
+    expect(normalizeModel("composer-2.5-fast")).toBe("default");
+    expect(normalizeModel("composer-latest")).toBe("default");
+    expect(normalizeModel("auto")).toBe("default");
+    expect(normalizeModel("gpt-5.5")).toBe("gpt-5.5");
   });
 
   it("does not cancel SDK glob calls on directory-only partial arguments", () => {
@@ -1343,6 +1352,37 @@ describe("Cursor SDK local-agent bridge", () => {
     expect(response.error.message).toContain("expected one of");
   });
 
+  it("does not fake a forwarded MCP result when the bridge callback is unavailable", () => {
+    const source = clientForwardingMcpServerSource([]);
+    const message = {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: {
+        name: "client_shell",
+        arguments: {
+          command: "printf SHOULD_NOT_RUN"
+        }
+      }
+    };
+
+    const result = spawnSync(process.execPath, ["-e", source], {
+      input: `${JSON.stringify(message)}\n`,
+      encoding: "utf8",
+      timeout: 3000,
+      env: {
+        ...process.env,
+        CURSOR_SDK_BRIDGE_CALLBACK_URL: "http://127.0.0.1:1/client-tool-call",
+        CURSOR_SDK_BRIDGE_AGENT_CACHE_KEY: "cache-key"
+      }
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe("");
+    const response = JSON.parse(result.stdout.trim());
+    expect(response.error.message).toContain("Outer client callback unavailable");
+  });
+
   it("tells the SDK to use client MCP tools instead of built-in local tools", () => {
     const prompt = bridgePrompt("USER: create a file");
 
@@ -1365,6 +1405,8 @@ describe("Cursor SDK local-agent bridge", () => {
     expect(createOptions.local).toEqual({
       cwd: "/tmp/project"
     });
+    expect(createOptions.mcpServers.client.env.CURSOR_SDK_BRIDGE_CALLBACK_URL).toContain("/client-tool-call");
+    expect(createOptions.mcpServers.client.env.CURSOR_SDK_BRIDGE_AGENT_CACHE_KEY).toMatch(/^[a-f0-9]{32}$/);
     expect(createOptions.local).not.toHaveProperty("sandboxOptions");
     expect(createOptions.local).not.toHaveProperty("settingSources");
     expect(sendOptions).toEqual({
