@@ -1989,6 +1989,208 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertNil(writeArguments["fileText"])
     }
 
+    func testChatToolCallsExpandNestedSDKArgumentsBeforeSchemaMapping() throws {
+        let prepared = try OpenAICompatibility.prepareChatRequest(Data(#"""
+        {
+          "model":"composer-2.5",
+          "messages":[{"role":"user","content":"write a file"}],
+          "tools":[
+            {
+              "type":"function",
+              "function":{
+                "name":"write_file",
+                "parameters":{
+                  "type":"object",
+                  "properties":{
+                    "filePath":{"type":"string"},
+                    "content":{"type":"string"}
+                  },
+                  "required":["filePath","content"]
+                }
+              }
+            }
+          ]
+        }
+        """#.utf8))
+        let toolCall = CursorToolCall(name: "write", arguments: [
+            "arguments": .object([
+                "file_path": .string("src/App.tsx"),
+                "contents": .string("export default function App() { return null }")
+            ])
+        ])
+
+        let object = OpenAICompatibility.chatCompletionResponse(
+            id: "chatcmpl_test",
+            created: 1,
+            prepared: prepared,
+            output: CursorSDKOutput(text: "", toolCalls: [toolCall], agentID: "agent-test", runID: "run-test")
+        )
+
+        let choices = try XCTUnwrap(object["choices"] as? [[String: Any]])
+        let message = try XCTUnwrap(choices.first?["message"] as? [String: Any])
+        let toolCalls = try XCTUnwrap(message["tool_calls"] as? [[String: Any]])
+        let function = try XCTUnwrap(toolCalls.first?["function"] as? [String: Any])
+        let arguments = try decodedArguments(function)
+
+        XCTAssertEqual(function["name"] as? String, "write_file")
+        XCTAssertEqual(arguments["filePath"] as? String, "src/App.tsx")
+        XCTAssertEqual(arguments["content"] as? String, "export default function App() { return null }")
+        XCTAssertNil(arguments["arguments"])
+        XCTAssertNil(arguments["file_path"])
+        XCTAssertNil(arguments["contents"])
+    }
+
+    func testChatToolCallsPreserveAdditionalPropertiesWhenClientSchemaAllowsThem() throws {
+        let prepared = try OpenAICompatibility.prepareChatRequest(Data(#"""
+        {
+          "model":"composer-2.5",
+          "messages":[{"role":"user","content":"call custom tool"}],
+          "tools":[
+            {
+              "type":"function",
+              "function":{
+                "name":"custom_tool",
+                "parameters":{
+                  "type":"object",
+                  "properties":{"input":{"type":"string"}},
+                  "required":["input"],
+                  "additionalProperties":true
+                }
+              }
+            }
+          ]
+        }
+        """#.utf8))
+        let toolCall = CursorToolCall(name: "custom_tool", arguments: [
+            "input": .string("hello"),
+            "customFlag": .bool(true)
+        ])
+
+        let object = OpenAICompatibility.chatCompletionResponse(
+            id: "chatcmpl_test",
+            created: 1,
+            prepared: prepared,
+            output: CursorSDKOutput(text: "", toolCalls: [toolCall], agentID: "agent-test", runID: "run-test")
+        )
+
+        let choices = try XCTUnwrap(object["choices"] as? [[String: Any]])
+        let message = try XCTUnwrap(choices.first?["message"] as? [String: Any])
+        let toolCalls = try XCTUnwrap(message["tool_calls"] as? [[String: Any]])
+        let function = try XCTUnwrap(toolCalls.first?["function"] as? [String: Any])
+        let arguments = try decodedArguments(function)
+
+        XCTAssertEqual(function["name"] as? String, "custom_tool")
+        XCTAssertEqual(arguments["input"] as? String, "hello")
+        XCTAssertEqual(arguments["customFlag"] as? Bool, true)
+    }
+
+    func testChatToolCallsMapSDKMCPArgsToSpecificClientTool() throws {
+        let prepared = try OpenAICompatibility.prepareChatRequest(Data(#"""
+        {
+          "model":"composer-2.5",
+          "messages":[{"role":"user","content":"use mcp"}],
+          "tools":[
+            {
+              "type":"function",
+              "function":{
+                "name":"mcp__filesystem__write_file",
+                "parameters":{
+                  "type":"object",
+                  "properties":{
+                    "filePath":{"type":"string"},
+                    "content":{"type":"string"}
+                  },
+                  "required":["filePath","content"]
+                }
+              }
+            }
+          ]
+        }
+        """#.utf8))
+        let toolCall = CursorToolCall(name: "mcp", arguments: [
+            "providerIdentifier": .string("filesystem"),
+            "toolName": .string("write_file"),
+            "args": .object([
+                "file_path": .string("src/App.tsx"),
+                "contents": .string("export default function App() { return null }")
+            ])
+        ])
+
+        let object = OpenAICompatibility.chatCompletionResponse(
+            id: "chatcmpl_test",
+            created: 1,
+            prepared: prepared,
+            output: CursorSDKOutput(text: "", toolCalls: [toolCall], agentID: "agent-test", runID: "run-test")
+        )
+
+        let choices = try XCTUnwrap(object["choices"] as? [[String: Any]])
+        let message = try XCTUnwrap(choices.first?["message"] as? [String: Any])
+        let toolCalls = try XCTUnwrap(message["tool_calls"] as? [[String: Any]])
+        let function = try XCTUnwrap(toolCalls.first?["function"] as? [String: Any])
+        let arguments = try decodedArguments(function)
+
+        XCTAssertEqual(function["name"] as? String, "mcp__filesystem__write_file")
+        XCTAssertEqual(arguments["filePath"] as? String, "src/App.tsx")
+        XCTAssertEqual(arguments["content"] as? String, "export default function App() { return null }")
+        XCTAssertNil(arguments["providerIdentifier"])
+        XCTAssertNil(arguments["toolName"])
+        XCTAssertNil(arguments["args"])
+    }
+
+    func testChatToolCallsMapSDKMCPArgsToWrapperTool() throws {
+        let prepared = try OpenAICompatibility.prepareChatRequest(Data(#"""
+        {
+          "model":"composer-2.5",
+          "messages":[{"role":"user","content":"use mcp"}],
+          "tools":[
+            {
+              "type":"function",
+              "function":{
+                "name":"call_mcp_tool",
+                "parameters":{
+                  "type":"object",
+                  "properties":{
+                    "serverName":{"type":"string"},
+                    "toolName":{"type":"string"},
+                    "arguments":{"type":"object"}
+                  },
+                  "required":["serverName","toolName","arguments"]
+                }
+              }
+            }
+          ]
+        }
+        """#.utf8))
+        let toolCall = CursorToolCall(name: "mcp", arguments: [
+            "providerIdentifier": .string("filesystem"),
+            "toolName": .string("write_file"),
+            "args": .object([
+                "file_path": .string("src/App.tsx")
+            ])
+        ])
+
+        let object = OpenAICompatibility.chatCompletionResponse(
+            id: "chatcmpl_test",
+            created: 1,
+            prepared: prepared,
+            output: CursorSDKOutput(text: "", toolCalls: [toolCall], agentID: "agent-test", runID: "run-test")
+        )
+
+        let choices = try XCTUnwrap(object["choices"] as? [[String: Any]])
+        let message = try XCTUnwrap(choices.first?["message"] as? [String: Any])
+        let toolCalls = try XCTUnwrap(message["tool_calls"] as? [[String: Any]])
+        let function = try XCTUnwrap(toolCalls.first?["function"] as? [String: Any])
+        let arguments = try decodedArguments(function)
+        let nested = try XCTUnwrap(arguments["arguments"] as? [String: Any])
+
+        XCTAssertEqual(function["name"] as? String, "call_mcp_tool")
+        XCTAssertEqual(arguments["serverName"] as? String, "filesystem")
+        XCTAssertEqual(arguments["toolName"] as? String, "write_file")
+        XCTAssertEqual(nested["file_path"] as? String, "src/App.tsx")
+        XCTAssertNil(arguments["providerIdentifier"])
+        XCTAssertNil(arguments["args"])
+    }
+
     func testChatToolCallsDefaultEmptySDKListToReadableDirectorySchema() throws {
         let prepared = try OpenAICompatibility.prepareChatRequest(Data(#"""
         {

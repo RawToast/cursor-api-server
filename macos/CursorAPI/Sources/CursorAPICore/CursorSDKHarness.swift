@@ -622,7 +622,13 @@ private struct CursorSDKToolSpec {
         case .readLints:
             return compact(["paths": strings(1)])
         case .mcp:
-            return compact(["providerIdentifier": string(1), "toolName": string(2), "toolCallId": string(4)])
+            return compact([
+                "name": string(1),
+                "args": protoValueMap(fields, 2),
+                "toolCallId": string(3),
+                "providerIdentifier": string(4),
+                "toolName": string(5)
+            ])
         case .semSearch:
             return compact(["query": string(1), "targetDirectories": strings(2), "explanation": string(3)])
         }
@@ -649,5 +655,68 @@ private struct CursorSDKToolSpec {
             if case .null = value { return nil }
             return value
         }
+    }
+
+    private static func protoValueMap(_ fields: [ProtoField], _ number: Int) -> JSONValue? {
+        var output: [String: JSONValue] = [:]
+        for field in fields where field.number == number {
+            guard case .bytes(let entryData) = field.value else { continue }
+            let entryFields = Proto.decodeFields(entryData)
+            guard let key = Proto.stringField(entryFields, 1),
+                  let valueData = Proto.dataField(entryFields, 2),
+                  let value = protoValue(valueData) else {
+                continue
+            }
+            output[key] = value
+        }
+        return output.isEmpty ? nil : .object(output)
+    }
+
+    private static func protoStruct(_ data: Data) -> [String: JSONValue]? {
+        var output: [String: JSONValue] = [:]
+        for field in Proto.decodeFields(data) where field.number == 1 {
+            guard case .bytes(let entryData) = field.value else { continue }
+            let entryFields = Proto.decodeFields(entryData)
+            guard let key = Proto.stringField(entryFields, 1),
+                  let valueData = Proto.dataField(entryFields, 2),
+                  let value = protoValue(valueData) else {
+                continue
+            }
+            output[key] = value
+        }
+        return output
+    }
+
+    private static func protoList(_ data: Data) -> [JSONValue]? {
+        let values = Proto.decodeFields(data).compactMap { field -> JSONValue? in
+            guard field.number == 1, case .bytes(let valueData) = field.value else { return nil }
+            return protoValue(valueData)
+        }
+        return values
+    }
+
+    private static func protoValue(_ data: Data) -> JSONValue? {
+        let fields = Proto.decodeFields(data)
+        if fields.contains(where: { $0.number == 1 }) {
+            return .null
+        }
+        if case .fixed64(let bits)? = fields.first(where: { $0.number == 2 })?.value {
+            return .number(Double(bitPattern: bits))
+        }
+        if let string = Proto.stringField(fields, 3) {
+            return .string(string)
+        }
+        if case .varint(let value)? = fields.first(where: { $0.number == 4 })?.value {
+            return .bool(value != 0)
+        }
+        if let structData = Proto.dataField(fields, 5),
+           let object = protoStruct(structData) {
+            return .object(object)
+        }
+        if let listData = Proto.dataField(fields, 6),
+           let array = protoList(listData) {
+            return .array(array)
+        }
+        return nil
     }
 }

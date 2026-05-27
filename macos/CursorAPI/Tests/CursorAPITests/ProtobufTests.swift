@@ -70,6 +70,37 @@ final class ProtobufTests: XCTestCase {
         XCTAssertFalse(CursorSDKStreamMarkers.hasToolCall(contextFrame))
     }
 
+    func testDecodesSDKMCPArgsMap() throws {
+        let mcpArgs = Proto.message([
+            Proto.stringField(1, "write_file"),
+            Proto.messageField(2, protoValueMapEntry("file_path", protoStringValue("src/App.tsx"))),
+            Proto.messageField(2, protoValueMapEntry("overwrite", protoBoolValue(true))),
+            Proto.stringField(3, "call-mcp-1"),
+            Proto.stringField(4, "filesystem"),
+            Proto.stringField(5, "write_file")
+        ])
+        let mcpTool = Proto.message([Proto.messageField(1, mcpArgs)])
+        let toolCallUpdate = Proto.message([Proto.messageField(2, Proto.message([Proto.messageField(15, mcpTool)]))])
+        let interaction = Proto.message([Proto.messageField(2, toolCallUpdate)])
+        let frame = Proto.message([Proto.messageField(1, interaction)])
+
+        var decoder = CursorSDKFrameDecoder()
+        let events = decoder.push(frame)
+
+        guard case .toolCall(let toolCall)? = events.first else {
+            XCTFail("Expected MCP tool call")
+            return
+        }
+        XCTAssertEqual(toolCall.name, "mcp")
+        XCTAssertEqual(toolCall.arguments["name"]?.stringValue, "write_file")
+        XCTAssertEqual(toolCall.arguments["providerIdentifier"]?.stringValue, "filesystem")
+        XCTAssertEqual(toolCall.arguments["toolName"]?.stringValue, "write_file")
+        XCTAssertEqual(toolCall.arguments["toolCallId"]?.stringValue, "call-mcp-1")
+        let args = try XCTUnwrap(toolCall.arguments["args"]?.objectValue)
+        XCTAssertEqual(args["file_path"]?.stringValue, "src/App.tsx")
+        XCTAssertEqual(args["overwrite"], .bool(true))
+    }
+
     func testNativeTransportConsumesRequestContextBeforeTurnEndDetection() {
         let context = CursorSDKProto.requestContextResult(id: 42, execID: "exec-1")
         let fields = Proto.decodeFields(context)
@@ -94,5 +125,20 @@ final class ProtobufTests: XCTestCase {
         XCTAssertTrue(afterContext.shouldForwardToDecoder)
         XCTAssertTrue(afterContext.isTurnEnded)
         XCTAssertFalse(afterContext.hasToolCall)
+    }
+
+    private func protoValueMapEntry(_ key: String, _ value: Data) -> Data {
+        Proto.message([
+            Proto.stringField(1, key),
+            Proto.messageField(2, value)
+        ])
+    }
+
+    private func protoStringValue(_ value: String) -> Data {
+        Proto.message([Proto.stringField(3, value)])
+    }
+
+    private func protoBoolValue(_ value: Bool) -> Data {
+        Proto.message([Proto.boolField(4, value)])
     }
 }

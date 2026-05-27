@@ -586,9 +586,11 @@ function decodeToolArgs(kind: ArgsKind, payload: Uint8Array): Record<string, unk
       return compactRecord({ paths: stringFields(fields, 1) });
     case "mcp":
       return compactRecord({
-        providerIdentifier: stringField(fields, 1),
-        toolName: stringField(fields, 2),
-        toolCallId: stringField(fields, 4)
+        name: stringField(fields, 1),
+        args: protoValueMap(fields, 2),
+        toolCallId: stringField(fields, 3),
+        providerIdentifier: stringField(fields, 4),
+        toolName: stringField(fields, 5)
       });
     case "semSearch":
       return compactRecord({
@@ -829,12 +831,24 @@ function decodeProtobufFields(bytes: Uint8Array): ProtobufField[] {
       const value = readVarint(bytes, offset);
       offset = value.offset;
       fields.push({ no: fieldNumber, wt: wireType, value: value.value });
+    } else if (wireType === 1) {
+      const end = offset + 8;
+      if (end > bytes.length) break;
+      const view = new DataView(bytes.buffer, bytes.byteOffset + offset, 8);
+      fields.push({ no: fieldNumber, wt: wireType, value: view.getFloat64(0, true) });
+      offset = end;
     } else if (wireType === 2) {
       const length = readVarint(bytes, offset);
       offset = length.offset;
       const end = offset + length.value;
       if (end > bytes.length) break;
       fields.push({ no: fieldNumber, wt: wireType, value: bytes.slice(offset, end) });
+      offset = end;
+    } else if (wireType === 5) {
+      const end = offset + 4;
+      if (end > bytes.length) break;
+      const view = new DataView(bytes.buffer, bytes.byteOffset + offset, 4);
+      fields.push({ no: fieldNumber, wt: wireType, value: view.getUint32(0, true) });
       offset = end;
     } else {
       break;
@@ -881,6 +895,49 @@ function numberField(fields: ProtobufField[], fieldNumber: number): number | und
 function booleanField(fields: ProtobufField[], fieldNumber: number): boolean | undefined {
   const value = numberField(fields, fieldNumber);
   return value === undefined ? undefined : value !== 0;
+}
+
+function protoValueMap(fields: ProtobufField[], fieldNumber: number): Record<string, unknown> | undefined {
+  const output: Record<string, unknown> = {};
+  for (const field of fields) {
+    if (field.no !== fieldNumber || !(field.value instanceof Uint8Array)) continue;
+    const entryFields = decodeProtobufFields(field.value);
+    const key = stringField(entryFields, 1);
+    const valueBytes = bytesField(entryFields, 2);
+    const value = valueBytes ? protoValue(valueBytes) : undefined;
+    if (key && value !== undefined) output[key] = value;
+  }
+  return Object.keys(output).length ? output : undefined;
+}
+
+function protoValue(bytes: Uint8Array): unknown {
+  const fields = decodeProtobufFields(bytes);
+  if (fields.some((field) => field.no === 1)) return null;
+  const numberValue = numberField(fields, 2);
+  if (numberValue !== undefined) return numberValue;
+  const stringValue = stringField(fields, 3);
+  if (stringValue !== undefined) return stringValue;
+  const boolValue = booleanField(fields, 4);
+  if (boolValue !== undefined) return boolValue;
+  const structValue = bytesField(fields, 5);
+  if (structValue) return protoStruct(structValue);
+  const listValue = bytesField(fields, 6);
+  if (listValue) return protoList(listValue);
+  return undefined;
+}
+
+function protoStruct(bytes: Uint8Array): Record<string, unknown> {
+  return protoValueMap(decodeProtobufFields(bytes), 1) ?? {};
+}
+
+function protoList(bytes: Uint8Array): unknown[] {
+  const output: unknown[] = [];
+  for (const field of decodeProtobufFields(bytes)) {
+    if (field.no !== 1 || !(field.value instanceof Uint8Array)) continue;
+    const value = protoValue(field.value);
+    if (value !== undefined) output.push(value);
+  }
+  return output;
 }
 
 function stringArg(args: Record<string, unknown>, key: string): string | undefined {

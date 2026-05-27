@@ -1254,7 +1254,7 @@ public enum OpenAICompatibility {
     }
 
     private static func resolveToolCall(_ toolCall: CursorToolCall, tools: [OpenAIToolSpec]) -> ResolvedToolCall {
-        guard let tool = resolveToolSpec(toolCall.name, tools: tools) else {
+        guard let tool = resolveToolSpec(toolCall.name, arguments: toolCall.arguments, tools: tools) else {
             return ResolvedToolCall(name: toolCall.name, arguments: toolCall.arguments)
         }
         return ResolvedToolCall(
@@ -1263,7 +1263,7 @@ public enum OpenAICompatibility {
         )
     }
 
-    private static func resolveToolSpec(_ name: String, tools: [OpenAIToolSpec]) -> OpenAIToolSpec? {
+    private static func resolveToolSpec(_ name: String, arguments: [String: JSONValue], tools: [OpenAIToolSpec]) -> OpenAIToolSpec? {
         if let exact = tools.first(where: { $0.name == name }) { return exact }
         let normalized = normalizedName(name)
         if let caseInsensitive = tools.first(where: { normalizedName($0.name) == normalized }) {
@@ -1273,6 +1273,11 @@ public enum OpenAICompatibility {
         let aliases = Set(toolAliases(for: name).map(normalizedName))
         if let aliased = tools.first(where: { aliases.contains(normalizedName($0.name)) }) {
             return aliased
+        }
+
+        if canonicalToolName(name) == "mcp",
+           let mcpTool = resolveSpecificMCPTool(arguments: arguments, tools: tools) {
+            return mcpTool
         }
 
         if canonicalToolName(name) == "ls",
@@ -1295,15 +1300,47 @@ public enum OpenAICompatibility {
         return nil
     }
 
+    private static func resolveSpecificMCPTool(arguments: [String: JSONValue], tools: [OpenAIToolSpec]) -> OpenAIToolSpec? {
+        let candidates = specificMCPToolNameCandidates(arguments: arguments)
+        guard !candidates.isEmpty else { return nil }
+        let normalizedCandidates = Set(candidates.map(normalizedName))
+        return tools.first { tool in
+            let normalizedTool = normalizedName(tool.name)
+            return normalizedCandidates.contains(normalizedTool)
+                || normalizedCandidates.contains(where: { normalizedTool.hasSuffix($0) })
+        }
+    }
+
+    private static func specificMCPToolNameCandidates(arguments: [String: JSONValue]) -> [String] {
+        let provider = firstArgument(in: arguments, keys: ["providerIdentifier", "provider_identifier", "provider", "server", "serverName", "server_name"])?.value.stringValue
+        let toolName = firstArgument(in: arguments, keys: ["toolName", "tool_name", "tool", "name"])?.value.stringValue
+        let values = [toolName, provider].compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty }
+        guard !values.isEmpty else { return [] }
+        var candidates: [String] = []
+        if let toolName {
+            candidates.append(toolName)
+        }
+        if let provider, let toolName {
+            candidates.append(contentsOf: [
+                "\(provider)__\(toolName)",
+                "\(provider)_\(toolName)",
+                "mcp__\(provider)__\(toolName)",
+                "mcp_\(provider)_\(toolName)"
+            ])
+        }
+        return candidates
+    }
+
     private static func normalizeArguments(
-        _ arguments: [String: JSONValue],
+        _ rawArguments: [String: JSONValue],
         sdkToolName: String,
         tool: OpenAIToolSpec
     ) -> [String: JSONValue] {
+        let canonical = canonicalToolName(sdkToolName)
+        let arguments = canonical == "mcp" ? rawArguments : expandedToolArguments(rawArguments)
         let properties = parameterPropertyNames(tool)
         let selectedTool = normalizedName(tool.name)
         let selectedCanonical = canonicalToolName(tool.name)
-        let canonical = canonicalToolName(sdkToolName)
 
         if selectedTool == "strreplaceeditor", canonical == "write" {
             return strReplaceEditorArguments(arguments, properties: properties)
@@ -1314,6 +1351,7 @@ public enum OpenAICompatibility {
         var output: [String: JSONValue] = [:]
         var consumed = Set<String>()
         let required = requiredParameterNames(tool)
+        let allowAdditionalProperties = parameterAllowsAdditionalProperties(tool)
 
         if canonical != "shell", selectedCanonical == "shell" {
             return shellFallbackArguments(arguments, sdkToolName: sdkToolName, tool: tool)
@@ -1321,6 +1359,10 @@ public enum OpenAICompatibility {
 
         if canonical == "ls", selectedCanonical == "glob" {
             return listAsGlobArguments(arguments, tool: tool)
+        }
+
+        if canonical == "mcp", selectedCanonical != "mcp" {
+            return specificMCPToolArguments(arguments, tool: tool)
         }
 
         func copy(_ source: String, as candidates: [String]) {
@@ -1390,6 +1432,8 @@ public enum OpenAICompatibility {
         case "readlints":
             copy("paths", as: ["files", "filePaths", "file_paths"])
         case "mcp":
+            copy("name", as: ["tool", "toolName", "tool_name"])
+            copy("args", as: ["arguments", "input", "params", "parameters"])
             copy("providerIdentifier", as: ["provider", "server", "serverName", "server_name"])
             copy("toolName", as: ["tool", "name", "tool_name"])
         case "semsearch":
@@ -1405,6 +1449,11 @@ public enum OpenAICompatibility {
         for (key, value) in arguments where !consumed.contains(key) {
             if let target = propertyName(matching: [key], in: properties) {
                 output[target] = value
+            } else if let target = aliasPropertyName(for: key, toolName: tool.name, properties: properties),
+                      output[target] == nil {
+                output[target] = value
+            } else if allowAdditionalProperties {
+                output[key] = value
             }
         }
 
@@ -1420,6 +1469,33 @@ public enum OpenAICompatibility {
         }
 
         return output.isEmpty ? arguments : output
+    }
+
+    private static func expandedToolArguments(_ arguments: [String: JSONValue]) -> [String: JSONValue] {
+        var output: [String: JSONValue] = [:]
+        for (key, value) in arguments {
+            let normalized = normalizedName(key)
+            if let nested = objectArgumentValue(value),
+               ["arguments", "args", "input", "parameters", "params", "targeting"].contains(normalized) {
+                output.merge(expandedToolArguments(nested), uniquingKeysWith: { current, _ in current })
+                continue
+            }
+            output[key] = value
+        }
+        return output
+    }
+
+    private static func objectArgumentValue(_ value: JSONValue) -> [String: JSONValue]? {
+        if case .object(let object) = value {
+            return object
+        }
+        guard let string = value.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+              string.hasPrefix("{"),
+              let data = string.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return object.mapValues(JSONValue.from)
     }
 
     private static func shellFallbackArguments(
@@ -1448,6 +1524,27 @@ public enum OpenAICompatibility {
             output[descriptionKey] = .string(shellToolDescription(for: command))
         }
         fillRequiredShellArguments(&output, source: arguments, properties: properties, required: requiredParameterNames(tool))
+        return output
+    }
+
+    private static func specificMCPToolArguments(_ arguments: [String: JSONValue], tool: OpenAIToolSpec) -> [String: JSONValue] {
+        let properties = parameterPropertyNames(tool)
+        let allowAdditionalProperties = parameterAllowsAdditionalProperties(tool)
+        guard !properties.isEmpty else {
+            return arguments["args"]?.objectValue ?? arguments
+        }
+        let payload = arguments["args"].flatMap(objectArgumentValue) ?? [:]
+        var output: [String: JSONValue] = [:]
+        for (key, value) in expandedToolArguments(payload) {
+            if let target = propertyName(matching: [key], in: properties) {
+                output[target] = value
+            } else if let target = aliasPropertyName(for: key, toolName: tool.name, properties: properties),
+                      output[target] == nil {
+                output[target] = value
+            } else if allowAdditionalProperties {
+                output[key] = value
+            }
+        }
         return output
     }
 
@@ -1832,6 +1929,20 @@ public enum OpenAICompatibility {
         required.contains(normalizedName(property))
     }
 
+    private static func parameterAllowsAdditionalProperties(_ tool: OpenAIToolSpec) -> Bool {
+        guard case .object(let root)? = tool.parameters,
+              let additional = root["additionalProperties"] else {
+            return false
+        }
+        if case .bool(true) = additional {
+            return true
+        }
+        if case .object = additional {
+            return true
+        }
+        return false
+    }
+
     private static func propertyName(matching candidates: [String], in properties: [String]) -> String? {
         for candidate in candidates {
             if properties.contains(candidate) {
@@ -1840,6 +1951,86 @@ public enum OpenAICompatibility {
         }
         let normalizedCandidates = Set(candidates.map(normalizedName))
         return properties.first { normalizedCandidates.contains(normalizedName($0)) }
+    }
+
+    private static func aliasPropertyName(for sourceKey: String, toolName: String, properties: [String]) -> String? {
+        let normalizedKey = normalizedName(sourceKey)
+        let candidates = toolSpecificArgumentAliases(toolName: normalizedName(toolName), normalizedKey: normalizedKey)
+            + commonArgumentAliases(normalizedKey)
+        return propertyName(matching: candidates, in: properties)
+    }
+
+    private static func commonArgumentAliases(_ normalizedKey: String) -> [String] {
+        switch normalizedKey {
+        case "absolutepath", "filepath", "filename", "targetfile", "file":
+            return pathPropertyAliases()
+        case "commandline", "cmd", "command", "script":
+            return ["command", "cmd", "script", "input"]
+        case "contents", "content", "filetext", "newcontents", "newtext":
+            return ["content", "contents", "text", "fileText", "file_text", "newString", "replacement"]
+        case "newstring", "replacement", "replace":
+            return ["newString", "replacement", "content", "text"]
+        case "oldcontents", "oldstring", "oldtext", "searchstring":
+            return ["oldString", "old", "search", "text"]
+        case "glob", "globpattern", "include":
+            return ["include", "pattern", "glob"]
+        case "pattern", "query", "regex", "search":
+            return ["pattern", "query", "regex", "search", "prompt"]
+        case "targetdirectory", "targeting", "directory", "cwd", "workingdirectory", "workdir":
+            return ["path", "directory", "cwd", "workdir", "filePath", "pattern"]
+        case "prompt", "instructions":
+            return ["prompt", "description", "instructions", "query"]
+        case "tasks", "todo", "items":
+            return ["todos", "items", "tasks"]
+        case "url", "uri", "href":
+            return ["url", "uri", "href"]
+        default:
+            return []
+        }
+    }
+
+    private static func toolSpecificArgumentAliases(toolName: String, normalizedKey: String) -> [String] {
+        switch canonicalToolName(toolName) {
+        case "glob":
+            if ["globpattern", "glob", "include", "pattern"].contains(normalizedKey) {
+                return ["pattern", "glob", "include"]
+            }
+            if ["targeting", "targetdirectory", "cwd", "directory", "path"].contains(normalizedKey) {
+                return ["path", "directory", "cwd"]
+            }
+        case "grep":
+            if ["query", "search", "searchstring", "regex", "pattern"].contains(normalizedKey) {
+                return ["pattern", "query", "regex", "search"]
+            }
+            if ["globpattern", "glob", "include"].contains(normalizedKey) {
+                return ["include", "glob", "files"]
+            }
+        case "read", "delete":
+            if ["targeting", "targetfile", "filepath", "absolutepath", "path", "file"].contains(normalizedKey) {
+                return pathPropertyAliases()
+            }
+        case "write":
+            if ["targeting", "targetfile", "filepath", "absolutepath", "path", "file"].contains(normalizedKey) {
+                return pathPropertyAliases()
+            }
+            if ["newcontents", "contents", "content", "text", "filetext"].contains(normalizedKey) {
+                return ["content", "text", "newString", "fileText", "file_text"]
+            }
+        case "shell":
+            if ["cmd", "commandline", "command", "script"].contains(normalizedKey) {
+                return ["command", "cmd", "script", "input"]
+            }
+            if ["workingdirectory", "cwd", "directory", "path", "workdir"].contains(normalizedKey) {
+                return ["workdir", "cwd", "directory", "path"]
+            }
+        case "todowrite":
+            if ["todos", "tasks", "items"].contains(normalizedKey) {
+                return ["todos", "tasks", "items"]
+            }
+        default:
+            break
+        }
+        return []
     }
 
     private static func canonicalToolName(_ name: String) -> String {

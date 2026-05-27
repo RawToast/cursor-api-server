@@ -33,6 +33,8 @@ public struct ProtoField: Equatable, Sendable {
 
 public enum ProtoValue: Equatable, Sendable {
     case varint(Int)
+    case fixed64(UInt64)
+    case fixed32(UInt32)
     case bytes(Data)
 }
 
@@ -87,6 +89,14 @@ public enum Proto {
                 let value = readVarint(data, offset: offset)
                 offset = value.offset
                 fields.append(ProtoField(number: number, wireType: wireType, value: .varint(value.value)))
+            } else if wireType == 1 {
+                let end = offset + 8
+                guard end <= data.count else { break }
+                let value = data[offset..<end].enumerated().reduce(UInt64(0)) { partial, item in
+                    partial | (UInt64(item.element) << UInt64(item.offset * 8))
+                }
+                offset = end
+                fields.append(ProtoField(number: number, wireType: wireType, value: .fixed64(value)))
             } else if wireType == 2 {
                 let length = readVarint(data, offset: offset)
                 offset = length.offset
@@ -94,6 +104,14 @@ public enum Proto {
                 guard end <= data.count else { break }
                 fields.append(ProtoField(number: number, wireType: wireType, value: .bytes(Data(data[offset..<end]))))
                 offset = end
+            } else if wireType == 5 {
+                let end = offset + 4
+                guard end <= data.count else { break }
+                let value = data[offset..<end].enumerated().reduce(UInt32(0)) { partial, item in
+                    partial | (UInt32(item.element) << UInt32(item.offset * 8))
+                }
+                offset = end
+                fields.append(ProtoField(number: number, wireType: wireType, value: .fixed32(value)))
             } else {
                 break
             }
