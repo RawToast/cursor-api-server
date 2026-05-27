@@ -1419,6 +1419,51 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertTrue(prepared.prompt.contains("Use SDK shell now."))
     }
 
+    func testChatFileRequestPrefersExplicitOpenCodeMCPToolHint() throws {
+        let prepared = try OpenAICompatibility.prepareChatRequest(Data(#"""
+        {
+          "model": "composer-2.5",
+          "messages": [
+            {"role": "user", "content": "Use the probe_write_file tool, not bash, to create mcp-marker.txt containing MCP_OK."}
+          ],
+          "tools": [
+            {
+              "type": "function",
+              "function": {
+                "name": "bash",
+                "parameters": {
+                  "type": "object",
+                  "properties": {
+                    "command": { "type": "string" },
+                    "description": { "type": "string" }
+                  }
+                }
+              }
+            },
+            {
+              "type": "function",
+              "function": {
+                "name": "probe_write_file",
+                "parameters": {
+                  "type": "object",
+                  "properties": {
+                    "file_path": { "type": "string" },
+                    "contents": { "type": "string" }
+                  },
+                  "required": ["file_path", "contents"]
+                }
+              }
+            }
+          ]
+        }
+        """#.utf8))
+
+        XCTAssertTrue(prepared.prompt.contains("LOCAL TOOL REQUIRED FOR THE LATEST USER REQUEST"))
+        XCTAssertTrue(prepared.prompt.contains("Use SDK mcp now with providerIdentifier \"probe\", toolName \"write_file\""))
+        XCTAssertTrue(prepared.prompt.contains("Do not use SDK shell/write as a substitute"))
+        XCTAssertFalse(prepared.prompt.contains("Use SDK shell now. For creating or overwriting a file"))
+    }
+
     func testChatToolResultsRenderPriorCallsAndContinuationPrompt() throws {
         let prepared = try OpenAICompatibility.prepareChatRequest(Data(#"""
         {

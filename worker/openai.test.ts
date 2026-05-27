@@ -187,6 +187,45 @@ describe("OpenAI compatibility adapter", () => {
     expect(prepared.prompt.text).not.toContain("A file-mutating tool call has already been made");
   });
 
+  it("prefers explicitly requested OpenCode MCP tools in SDK prompts", () => {
+    const prepared = prepareOpencodeSdkChatRequest(
+      {
+        model: "composer-2.5-sdk",
+        messages: [
+          { role: "user", content: "Use the probe_write_file tool, not bash, to create mcp-marker.txt containing MCP_OK." }
+        ],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "bash",
+              description: "Run a shell command",
+              parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] }
+            }
+          },
+          {
+            type: "function",
+            function: {
+              name: "probe_write_file",
+              description: "Write through probe MCP",
+              parameters: {
+                type: "object",
+                properties: { file_path: { type: "string" }, contents: { type: "string" } },
+                required: ["file_path", "contents"]
+              }
+            }
+          }
+        ]
+      },
+      { id: "composer-2.5-sdk" }
+    );
+
+    expect(prepared.prompt.text).toContain('Use SDK mcp now with providerIdentifier "probe", toolName "write_file"');
+    expect(prepared.prompt.text).toContain("Do not use SDK shell/write as a substitute");
+    expect(prepared.prompt.text).toContain("OpenCode MCP/server tools exposed as provider_tool names should be requested with SDK mcp");
+    expect(prepared.prompt.text).not.toContain("Your next tool call must be write or shell");
+  });
+
   it("marks SDK workspace mutation done after a file-writing shell command", () => {
     const prepared = prepareOpencodeSdkChatRequest(
       {

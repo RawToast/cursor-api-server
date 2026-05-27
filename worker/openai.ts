@@ -144,17 +144,19 @@ export function prepareOpencodeSdkChatRequest(body: unknown, cursorModel: { id: 
   const model = typeof record.model === "string" && record.model.trim() ? record.model.trim() : "composer-2.5";
   const workspaceMutationRequired = tools.length > 0 && hasWorkspaceMutationIntent(messages);
   const workspaceMutationDone = workspaceMutationRequired && hasWorkspaceMutationToolCall(messages);
+  const latestUserText = latestUserTextFromMessages(messages);
   const transcript: string[] = [
     "You are running through an SDK-compatible OpenCode harness.",
     "OpenCode owns local tool execution. When local inspection, shell commands, or file changes are needed, request a tool call and wait for the tool result.",
     "When the conversation includes LOCAL OPENCODE TOOL RESULT records, treat them as completed SDK tool_call results for your previous tool requests and continue from those results.",
-    "For creating new files, request write calls with both path and fileText. Do not use edit for new files or emit edit calls without complete replacement details.",
-    "For scaffolding a project, prefer shell with a complete command that creates files using heredocs, installs dependencies, and runs tests; shell requires the command argument.",
+    "If the user explicitly names an allowed client tool, use that tool. OpenCode MCP/server tools exposed as provider_tool names are called through SDK mcp with providerIdentifier, toolName, and args.",
+    "For creating new files when no specific client tool is requested, request write calls with both path and fileText. Do not use edit for new files or emit edit calls without complete replacement details.",
+    "For project scaffolding when no specific client tool is requested, prefer shell with a complete command that creates files using heredocs, installs dependencies, and runs tests; shell requires the command argument.",
     "When starting a dev server or other long-running watcher, start it in the background with output redirected and return immediately; do not request a foreground server command.",
     "Do not say that agent mode or tools are unavailable. Do not ask the user to switch modes."
   ];
   appendSdkToolInventory(transcript, tools, record.tool_choice);
-  appendSdkWorkspaceMutationRequirement(transcript, workspaceMutationRequired, workspaceMutationDone);
+  appendSdkWorkspaceMutationRequirement(transcript, workspaceMutationRequired, workspaceMutationDone, tools, latestUserText);
   transcript.push("", "Conversation:");
 
   const images: CursorImage[] = [];
@@ -610,7 +612,9 @@ function appendSdkToolInventory(transcript: string[], tools: OpenAiToolSpec[], t
     "",
     "OPENCODE TOOL INVENTORY:",
     `Allowed tool names: ${tools.map((tool) => tool.name).join(", ")}`,
-    "Use only the client's local tools for filesystem and shell work. Prefer shell/read/write/edit/glob/grep/ls style tool requests when those capabilities are present."
+    "Use only the client's local tools for filesystem and shell work.",
+    "When the user names a specific allowed client tool, do not substitute a different tool. OpenCode MCP/server tools exposed as provider_tool names should be requested with SDK mcp.",
+    "For general local work, prefer shell/read/write/edit/glob/grep/ls style tool requests when those capabilities are present."
   );
   for (const tool of tools) {
     transcript.push(
@@ -641,18 +645,83 @@ function appendWorkspaceMutationRequirement(transcript: string[], required: bool
   );
 }
 
-function appendSdkWorkspaceMutationRequirement(transcript: string[], required: boolean, done: boolean) {
+function appendSdkWorkspaceMutationRequirement(
+  transcript: string[],
+  required: boolean,
+  done: boolean,
+  tools: OpenAiToolSpec[],
+  latestUserText: string
+) {
   if (!required) return;
+  const requestedTool = explicitlyRequestedToolName(latestUserText, tools);
   transcript.push(
     "",
     "SDK WORKSPACE MUTATION REQUIRED:",
     "The user is asking you to create or change project files. You must perform the change with local OpenCode tools.",
     "If the workspace is empty, stop probing after the first empty result and create the project files.",
-    "Use either write with path and fileText, or shell with command. Do not use edit for new files.",
+    requestedTool
+      ? requestedToolHint(requestedTool)
+      : "Use either write with path and fileText, or shell with command. Do not use edit for new files.",
     done
       ? "A file-mutating tool call has already been made. Continue from the returned tool results and run verification commands when needed."
-      : "No file-mutating tool call has been made yet. Your next tool call must be write or shell with complete arguments, not glob, edit, or prose."
+      : requestedTool
+        ? "No file-mutating tool call has been made yet. Your next tool call must use the explicitly requested client tool, not shell/write as a substitute."
+        : "No file-mutating tool call has been made yet. Your next tool call must be write or shell with complete arguments, not glob, edit, or prose."
   );
+}
+
+function explicitlyRequestedToolName(text: string, tools: OpenAiToolSpec[]): string | undefined {
+  const lower = text.toLowerCase();
+  return [...tools].sort((a, b) => b.name.length - a.name.length).find((tool) => {
+    const name = tool.name.trim();
+    if (name.length <= 3) return false;
+    const loweredName = name.toLowerCase();
+    const normalized = normalizeToolName(name);
+    if (
+      lower.includes(`${loweredName} tool`) ||
+      lower.includes(`tool ${loweredName}`) ||
+      lower.includes(`tool named ${loweredName}`) ||
+      lower.includes(`use ${loweredName}`)
+    ) {
+      return true;
+    }
+    return (name.includes("_") || name.includes("-")) && (lower.includes(loweredName) || lower.includes(normalized));
+  })?.name;
+}
+
+function requestedToolHint(toolName: string): string {
+  const target = mcpTargetForClientToolName(toolName);
+  if (target) {
+    return `Use SDK mcp now with providerIdentifier "${target.provider}", toolName "${target.toolName}", and args matching the ${toolName} schema. Do not use SDK shell/write as a substitute for this explicitly requested client tool.`;
+  }
+  return `Use the explicitly requested client tool ${toolName} now, with arguments matching its schema. Do not substitute a different tool.`;
+}
+
+function mcpTargetForClientToolName(name: string): { provider: string; toolName: string } | undefined {
+  if (isKnownMappedToolName(name)) return undefined;
+  if (name.startsWith("mcp__")) {
+    const parts = name.split("__").filter(Boolean);
+    if (parts.length >= 3) return { provider: parts[1], toolName: parts.slice(2).join("__") };
+  }
+  const index = name.indexOf("_");
+  if (index <= 0 || index >= name.length - 1) return undefined;
+  return { provider: name.slice(0, index), toolName: name.slice(index + 1) };
+}
+
+function isKnownMappedToolName(name: string): boolean {
+  return new Set([
+    "bash", "shell", "terminal", "runterminalcmd", "runterminalcommand", "runshellcommand",
+    "write", "writefile", "createfile",
+    "read", "readfile", "openfile",
+    "edit", "editfile", "replacefile", "searchreplace",
+    "delete", "deletefile", "removefile",
+    "grep", "search", "searchfiles", "ripgrep", "rg",
+    "glob", "fileglob", "filesearch", "findfiles",
+    "ls", "list", "listfiles", "listdirectory",
+    "mcp", "callmcptool",
+    "semsearch", "semanticsearch", "searchcode",
+    "todowrite", "todowritetoolcall", "updatetodos", "writetodos"
+  ]).has(normalizeToolName(name));
 }
 
 function validateCommonUnsupported(record: Record<string, unknown>) {
@@ -771,6 +840,14 @@ function hasWorkspaceMutationIntent(messages: unknown[]): boolean {
     .join("\n")
     .toLowerCase();
   return /\b(make|create|build|add|write|generate|scaffold|implement|set up|setup)\b/.test(userText);
+}
+
+function latestUserTextFromMessages(messages: unknown[]): string {
+  for (const message of [...messages].reverse()) {
+    if (!isRecord(message) || message.role !== "user") continue;
+    return contentToPlainText(message.content);
+  }
+  return "";
 }
 
 function hasWorkspaceMutationToolCall(messages: unknown[]): boolean {
