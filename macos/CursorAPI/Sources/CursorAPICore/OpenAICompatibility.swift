@@ -1856,6 +1856,10 @@ public enum OpenAICompatibility {
             return compactJSON([
                 "paths": firstArgument(in: arguments, keys: fileCollectionAliases())?.value
             ])
+        case "todowrite":
+            return compactJSON([
+                "todos": firstArgument(in: arguments, keys: todoCollectionAliases())?.value
+            ])
         default:
             return arguments
         }
@@ -2331,7 +2335,7 @@ public enum OpenAICompatibility {
             copy("targetDirectories", as: ["target_directories", "directories", "paths"])
             copy("explanation", as: ["reason", "why"])
         case "todowrite":
-            copy("todos", as: ["todoList", "todo_list", "items"])
+            copyFirst(todoCollectionAliases(), as: todoCollectionAliases())
         default:
             break
         }
@@ -3175,11 +3179,12 @@ public enum OpenAICompatibility {
     }
 
     private static func normalizeTodoWriteArguments(_ arguments: [String: JSONValue]) -> [String: JSONValue] {
-        guard case .array(let todos)? = arguments["todos"] else {
+        guard let argument = firstArgument(in: arguments, keys: todoCollectionAliases()),
+              case .array(let todos) = argument.value else {
             return arguments
         }
         var output = arguments
-        output["todos"] = .array(todos.map { item in
+        output[argument.key] = .array(todos.map { item in
             guard case .object(var todo) = item else {
                 return item
             }
@@ -4296,7 +4301,7 @@ public enum OpenAICompatibility {
         case "semsearch":
             return toolCanonical == "semsearch" && has(["query", "pattern", "search"])
         case "todowrite":
-            return has(["todos", "todoList", "todo_list", "items"])
+            return has(todoCollectionAliases())
         default:
             return false
         }
@@ -4378,7 +4383,7 @@ public enum OpenAICompatibility {
         case "prompt", "instructions":
             return ["prompt", "description", "instructions", "query"]
         case "tasks", "todo", "items":
-            return ["todos", "items", "tasks"]
+            return todoCollectionAliases()
         case "url", "uri", "href":
             return ["url", "uri", "href"]
         default:
@@ -4434,8 +4439,8 @@ public enum OpenAICompatibility {
                 return shellWorkdirAliases()
             }
         case "todowrite":
-            if ["todos", "tasks", "items"].contains(normalizedKey) {
-                return ["todos", "tasks", "items"]
+            if todoCollectionAliases().map(normalizedName).contains(normalizedKey) {
+                return todoCollectionAliases()
             }
         default:
             break
@@ -4520,6 +4525,13 @@ public enum OpenAICompatibility {
             "path", "file_path", "filePath", "filename", "file",
             "target", "targetPath", "target_path", "targetFile", "target_file",
             "absolutePath", "absolute_path", "relativePath", "relative_path"
+        ]
+    }
+
+    private static func todoCollectionAliases() -> [String] {
+        [
+            "todos", "todoList", "todo_list", "todoItems", "todo_items",
+            "items", "tasks", "taskList", "task_list"
         ]
     }
 

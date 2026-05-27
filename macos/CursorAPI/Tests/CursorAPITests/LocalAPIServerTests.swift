@@ -7161,6 +7161,186 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertNil(arguments["paths"])
     }
 
+    func testChatToolCallsMapSDKTodosToTaskCollectionSchema() throws {
+        let prepared = try OpenAICompatibility.prepareChatRequest(Data(#"""
+        {
+          "model":"composer-2.5",
+          "messages":[{"role":"user","content":"update the plan"}],
+          "tools":[
+            {
+              "type":"function",
+              "function":{
+                "name":"set_plan",
+                "parameters":{
+                  "type":"object",
+                  "additionalProperties":false,
+                  "properties":{
+                    "tasks":{
+                      "type":"array",
+                      "items":{
+                        "type":"object",
+                        "additionalProperties":false,
+                        "properties":{
+                          "content":{"type":"string"},
+                          "status":{"type":"string"},
+                          "priority":{"type":"string"}
+                        },
+                        "required":["content","status","priority"]
+                      }
+                    }
+                  },
+                  "required":["tasks"]
+                }
+              }
+            }
+          ]
+        }
+        """#.utf8))
+
+        let object = OpenAICompatibility.chatCompletionResponse(
+            id: "chatcmpl_todo_tasks",
+            created: 1,
+            prepared: prepared,
+            output: CursorSDKOutput(text: "", toolCalls: [
+                CursorToolCall(name: "updateTodos", arguments: [
+                    "todos": .array([
+                        .object([
+                            "content": .string("Ship local API"),
+                            "status": .string("todo_status_in_progress")
+                        ])
+                    ])
+                ])
+            ], agentID: "agent-test", runID: "run-test")
+        )
+
+        let choices = try XCTUnwrap(object["choices"] as? [[String: Any]])
+        let message = try XCTUnwrap(choices.first?["message"] as? [String: Any])
+        let toolCalls = try XCTUnwrap(message["tool_calls"] as? [[String: Any]])
+        let function = try XCTUnwrap(toolCalls.first?["function"] as? [String: Any])
+        let arguments = try decodedArguments(function)
+        let tasks = try XCTUnwrap(arguments["tasks"] as? [[String: Any]])
+
+        XCTAssertEqual(function["name"] as? String, "set_plan")
+        XCTAssertEqual(tasks.first?["content"] as? String, "Ship local API")
+        XCTAssertEqual(tasks.first?["status"] as? String, "in_progress")
+        XCTAssertEqual(tasks.first?["priority"] as? String, "medium")
+        XCTAssertNil(arguments["todos"])
+    }
+
+    func testChatToolResultsFeedTaskCollectionBackAsSDKTodos() throws {
+        let requestData = Data(#"""
+        {
+          "model":"composer-2.5",
+          "messages":[{"role":"user","content":"update the plan"}],
+          "tools":[
+            {
+              "type":"function",
+              "function":{
+                "name":"set_plan",
+                "parameters":{
+                  "type":"object",
+                  "additionalProperties":false,
+                  "properties":{
+                    "tasks":{"type":"array","items":{"type":"object"}}
+                  },
+                  "required":["tasks"]
+                }
+              }
+            }
+          ]
+        }
+        """#.utf8)
+        let prepared = try OpenAICompatibility.prepareChatRequest(requestData)
+        let response = OpenAICompatibility.chatCompletionResponse(
+            id: "chatcmpl_todo_feedback",
+            created: 1,
+            prepared: prepared,
+            output: CursorSDKOutput(text: "", toolCalls: [
+                CursorToolCall(name: "updateTodos", arguments: [
+                    "todos": .array([.object(["content": .string("Ship"), "status": .string("pending")])])
+                ])
+            ], agentID: "agent-test", runID: "run-test")
+        )
+        let choices = try XCTUnwrap(response["choices"] as? [[String: Any]])
+        let message = try XCTUnwrap(choices.first?["message"] as? [String: Any])
+        let toolCalls = try XCTUnwrap(message["tool_calls"] as? [[String: Any]])
+        let requestObject = try XCTUnwrap(JSONSerialization.jsonObject(with: requestData) as? [String: Any])
+        let tools = try XCTUnwrap(requestObject["tools"] as? [[String: Any]])
+
+        let continueData = try JSONSerialization.data(withJSONObject: [
+            "model": "composer-2.5",
+            "messages": [
+                ["role": "user", "content": "update the plan"],
+                ["role": "assistant", "content": NSNull(), "tool_calls": toolCalls],
+                ["role": "tool", "tool_call_id": toolCalls.first?["id"] as? String ?? "", "content": "Plan saved"]
+            ],
+            "tools": tools
+        ])
+        let continued = try OpenAICompatibility.prepareChatRequest(continueData)
+        let prefix = "LOCAL TOOL RESULT: "
+        let feedbackLine = try XCTUnwrap(continued.prompt.split(separator: "\n").first { $0.hasPrefix(prefix) })
+        let feedback = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(String(feedbackLine.dropFirst(prefix.count)).utf8)) as? [String: Any])
+        let arguments = try XCTUnwrap(feedback["arguments"] as? [String: Any])
+        let todos = try XCTUnwrap(arguments["todos"] as? [[String: Any]])
+
+        XCTAssertEqual(feedback["toolName"] as? String, "todowrite")
+        XCTAssertEqual(todos.first?["content"] as? String, "Ship")
+        XCTAssertEqual(todos.first?["status"] as? String, "pending")
+        XCTAssertNil(arguments["tasks"])
+    }
+
+    func testResponsesFunctionCallsMapSDKTodosToItemsCollectionSchema() throws {
+        let prepared = try OpenAICompatibility.prepareResponsesRequest(Data(#"""
+        {
+          "model":"composer-2.5",
+          "input":"update the plan",
+          "tools":[
+            {
+              "type":"function",
+              "name":"plan_update",
+              "parameters":{
+                "type":"object",
+                "additionalProperties":false,
+                "properties":{
+                  "items":{"type":"array","items":{"type":"object"}}
+                },
+                "required":["items"]
+              }
+            }
+          ]
+        }
+        """#.utf8))
+
+        let object = OpenAICompatibility.responseObject(
+            id: "resp_todo_items",
+            created: 1,
+            prepared: prepared,
+            output: CursorSDKOutput(text: "", toolCalls: [
+                CursorToolCall(name: "updateTodos", arguments: [
+                    "todoList": .array([
+                        .object([
+                            "content": .string("Wire Responses"),
+                            "status": .string("todo_status_done"),
+                            "priority": .string("")
+                        ])
+                    ])
+                ])
+            ], agentID: "agent-test", runID: "run-test")
+        )
+
+        let outputItems = try XCTUnwrap(object["output"] as? [[String: Any]])
+        let functionCall = try XCTUnwrap(outputItems.first { ($0["type"] as? String) == "function_call" })
+        let arguments = try decodedArguments(functionCall)
+        let items = try XCTUnwrap(arguments["items"] as? [[String: Any]])
+
+        XCTAssertEqual(functionCall["name"] as? String, "plan_update")
+        XCTAssertEqual(items.first?["content"] as? String, "Wire Responses")
+        XCTAssertEqual(items.first?["status"] as? String, "completed")
+        XCTAssertEqual(items.first?["priority"] as? String, "medium")
+        XCTAssertNil(arguments["todos"])
+        XCTAssertNil(arguments["todoList"])
+    }
+
     func testResponsesFunctionCallsPreferSchemaValidProviderSpecificMCPTool() throws {
         let prepared = try OpenAICompatibility.prepareResponsesRequest(Data(#"""
         {
