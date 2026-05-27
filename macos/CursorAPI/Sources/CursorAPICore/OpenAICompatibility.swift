@@ -3782,6 +3782,12 @@ public enum OpenAICompatibility {
         if !types.isEmpty, !types.contains(where: { jsonValue(value, matchesType: $0) }) {
             return false
         }
+        if !stringValueSatisfiesSchema(value, schema: object) {
+            return false
+        }
+        if !numberValueSatisfiesSchema(value, schema: object) {
+            return false
+        }
         if objectConstraintsApply(object, value: value, types: types),
            !objectValueSatisfiesSchema(value, schema: object) {
             return false
@@ -3789,6 +3795,57 @@ public enum OpenAICompatibility {
         if arrayConstraintsApply(object, value: value, types: types),
            !arrayValueSatisfiesSchema(value, schema: object) {
             return false
+        }
+        return true
+    }
+
+    private static func stringValueSatisfiesSchema(_ value: JSONValue, schema: [String: JSONValue]) -> Bool {
+        guard let string = value.stringValue else { return true }
+        if let minLength = schema["minLength"]?.integerValue, string.count < minLength {
+            return false
+        }
+        if let maxLength = schema["maxLength"]?.integerValue, string.count > maxLength {
+            return false
+        }
+        guard let pattern = schema["pattern"]?.stringValue, !pattern.isEmpty else {
+            return true
+        }
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return true
+        }
+        let range = NSRange(string.startIndex..<string.endIndex, in: string)
+        return regex.firstMatch(in: string, range: range) != nil
+    }
+
+    private static func numberValueSatisfiesSchema(_ value: JSONValue, schema: [String: JSONValue]) -> Bool {
+        guard let number = value.numberValue else { return true }
+        if let minimum = schema["minimum"]?.numberValue, number < minimum {
+            return false
+        }
+        if let maximum = schema["maximum"]?.numberValue, number > maximum {
+            return false
+        }
+        if let exclusiveMinimum = schema["exclusiveMinimum"]?.numberValue, number <= exclusiveMinimum {
+            return false
+        }
+        if schema["exclusiveMinimum"] == .bool(true),
+           let minimum = schema["minimum"]?.numberValue,
+           number <= minimum {
+            return false
+        }
+        if let exclusiveMaximum = schema["exclusiveMaximum"]?.numberValue, number >= exclusiveMaximum {
+            return false
+        }
+        if schema["exclusiveMaximum"] == .bool(true),
+           let maximum = schema["maximum"]?.numberValue,
+           number >= maximum {
+            return false
+        }
+        if let multipleOf = schema["multipleOf"]?.numberValue, multipleOf > 0 {
+            let quotient = number / multipleOf
+            if abs(quotient - quotient.rounded()) > .ulpOfOne * 100 {
+                return false
+            }
         }
         return true
     }
@@ -4870,6 +4927,17 @@ private extension String {
 }
 
 private extension JSONValue {
+    var numberValue: Double? {
+        switch self {
+        case .number(let value):
+            return value
+        case .string(let value):
+            return Double(value.trimmingCharacters(in: .whitespacesAndNewlines))
+        default:
+            return nil
+        }
+    }
+
     var integerValue: Int? {
         switch self {
         case .number(let value):

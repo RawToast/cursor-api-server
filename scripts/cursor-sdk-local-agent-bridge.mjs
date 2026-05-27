@@ -306,6 +306,8 @@ const jsonPointerTarget = ${jsonPointerTarget.toString()};
 const decodeJsonPointerSegment = ${decodeJsonPointerSegment.toString()};
 const schemaTypes = ${schemaTypes.toString()};
 const schemaAllowsNull = ${schemaAllowsNull.toString()};
+const validateStringConstraints = ${validateStringConstraints.toString()};
+const validateNumberConstraints = ${validateNumberConstraints.toString()};
 const jsonValueMatchesType = ${jsonValueMatchesType.toString()};
 const jsonValuesEqual = ${jsonValuesEqual.toString()};
 const isRecord = ${isRecord.toString()};
@@ -404,6 +406,10 @@ function validateJsonSchemaValue(value, schema, path, rootSchema = schema, seenR
   if (types.length && !types.some((type) => jsonValueMatchesType(value, type))) {
     return `Invalid value for ${path}: expected ${types.join(" or ")}`;
   }
+  const stringConstraintError = validateStringConstraints(value, schema, path);
+  if (stringConstraintError) return stringConstraintError;
+  const numberConstraintError = validateNumberConstraints(value, schema, path);
+  if (numberConstraintError) return numberConstraintError;
 
   const objectLike = schema.properties || schema.required || schema.additionalProperties !== undefined || types.includes("object");
   if (objectLike) {
@@ -548,6 +554,54 @@ function schemaAllowsNull(schema, rootSchema = schema, seenRefs = new Set()) {
     }
   }
   return false;
+}
+
+function validateStringConstraints(value, schema, path) {
+  if (typeof value !== "string") return null;
+  const length = [...value].length;
+  if (Number.isInteger(schema.minLength) && length < schema.minLength) {
+    return `Invalid value for ${path}: expected at least ${schema.minLength} character(s)`;
+  }
+  if (Number.isInteger(schema.maxLength) && length > schema.maxLength) {
+    return `Invalid value for ${path}: expected at most ${schema.maxLength} character(s)`;
+  }
+  if (typeof schema.pattern === "string" && schema.pattern) {
+    try {
+      if (!new RegExp(schema.pattern).test(value)) {
+        return `Invalid value for ${path}: expected to match pattern ${schema.pattern}`;
+      }
+    } catch {}
+  }
+  return null;
+}
+
+function validateNumberConstraints(value, schema, path) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  if (typeof schema.minimum === "number" && value < schema.minimum) {
+    return `Invalid value for ${path}: expected >= ${schema.minimum}`;
+  }
+  if (typeof schema.maximum === "number" && value > schema.maximum) {
+    return `Invalid value for ${path}: expected <= ${schema.maximum}`;
+  }
+  if (typeof schema.exclusiveMinimum === "number" && value <= schema.exclusiveMinimum) {
+    return `Invalid value for ${path}: expected > ${schema.exclusiveMinimum}`;
+  }
+  if (schema.exclusiveMinimum === true && typeof schema.minimum === "number" && value <= schema.minimum) {
+    return `Invalid value for ${path}: expected > ${schema.minimum}`;
+  }
+  if (typeof schema.exclusiveMaximum === "number" && value >= schema.exclusiveMaximum) {
+    return `Invalid value for ${path}: expected < ${schema.exclusiveMaximum}`;
+  }
+  if (schema.exclusiveMaximum === true && typeof schema.maximum === "number" && value >= schema.maximum) {
+    return `Invalid value for ${path}: expected < ${schema.maximum}`;
+  }
+  if (typeof schema.multipleOf === "number" && schema.multipleOf > 0) {
+    const quotient = value / schema.multipleOf;
+    if (Math.abs(quotient - Math.round(quotient)) > Number.EPSILON * 100) {
+      return `Invalid value for ${path}: expected a multiple of ${schema.multipleOf}`;
+    }
+  }
+  return null;
 }
 
 function jsonValueMatchesType(value, type) {

@@ -388,6 +388,31 @@ describe("Cursor SDK local-agent bridge", () => {
     })).toBe(null);
   });
 
+  it("validates dynamic client MCP scalar constraints", () => {
+    const tools = clientMcpToolDefinitions([
+      {
+        name: "constrained_search",
+        parameters: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            query: { type: "string", minLength: 2, maxLength: 12, pattern: "^[A-Za-z0-9_]+$" },
+            limit: { type: "integer", minimum: 1, maximum: 50, multipleOf: 5 }
+          },
+          required: ["query", "limit"]
+        }
+      }
+    ]);
+
+    expect(validateClientMcpToolCall(tools, "constrained_search", { query: "", limit: 5 })).toBe("Invalid value for constrained_search.query: expected at least 2 character(s)");
+    expect(validateClientMcpToolCall(tools, "constrained_search", { query: "todo app", limit: 5 })).toContain("expected to match pattern");
+    expect(validateClientMcpToolCall(tools, "constrained_search", { query: "todo_app_name", limit: 5 })).toBe("Invalid value for constrained_search.query: expected at most 12 character(s)");
+    expect(validateClientMcpToolCall(tools, "constrained_search", { query: "todo_app", limit: 0 })).toBe("Invalid value for constrained_search.limit: expected >= 1");
+    expect(validateClientMcpToolCall(tools, "constrained_search", { query: "todo_app", limit: 55 })).toBe("Invalid value for constrained_search.limit: expected <= 50");
+    expect(validateClientMcpToolCall(tools, "constrained_search", { query: "todo_app", limit: 7 })).toBe("Invalid value for constrained_search.limit: expected a multiple of 5");
+    expect(validateClientMcpToolCall(tools, "constrained_search", { query: "todo_app", limit: 10 })).toBe(null);
+  });
+
   it("validates nested dynamic client MCP schemas before accepting forwarding calls", () => {
     const tools = clientMcpToolDefinitions([
       {

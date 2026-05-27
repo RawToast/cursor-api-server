@@ -6678,6 +6678,51 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertEqual((message["tool_calls"] as? [[String: Any]])?.count, 0)
     }
 
+    func testChatToolCallsDoNotEmitSpecificMCPToolCallsViolatingScalarConstraints() throws {
+        let prepared = try OpenAICompatibility.prepareChatRequest(Data(#"""
+        {
+          "model":"composer-2.5",
+          "messages":[{"role":"user","content":"use mcp"}],
+          "tools":[
+            {
+              "type":"function",
+              "function":{
+                "name":"mcp__github__create_issue",
+                "parameters":{
+                  "type":"object",
+                  "additionalProperties":false,
+                  "properties":{
+                    "title":{"type":"string","minLength":1,"pattern":"^[A-Z]"},
+                    "priority":{"type":"integer","minimum":1,"maximum":5,"multipleOf":1}
+                  },
+                  "required":["title","priority"]
+                }
+              }
+            }
+          ]
+        }
+        """#.utf8))
+        let toolCall = CursorToolCall(name: "mcp", arguments: [
+            "providerIdentifier": .string("github"),
+            "toolName": .string("create_issue"),
+            "args": .object([
+                "title": .string(""),
+                "priority": .number(3)
+            ])
+        ])
+
+        let object = OpenAICompatibility.chatCompletionResponse(
+            id: "chatcmpl_test",
+            created: 1,
+            prepared: prepared,
+            output: CursorSDKOutput(text: "", toolCalls: [toolCall], agentID: "agent-test", runID: "run-test")
+        )
+
+        let choices = try XCTUnwrap(object["choices"] as? [[String: Any]])
+        let message = try XCTUnwrap(choices.first?["message"] as? [String: Any])
+        XCTAssertEqual((message["tool_calls"] as? [[String: Any]])?.count, 0)
+    }
+
     func testChatToolCallsDoNotEmitWrapperMCPCallsWithSchemaInvalidNestedInput() throws {
         let prepared = try OpenAICompatibility.prepareChatRequest(Data(#"""
         {
@@ -7773,6 +7818,48 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertNil(arguments["providerIdentifier"])
         XCTAssertNil(arguments["toolName"])
         XCTAssertNil(arguments["args"])
+    }
+
+    func testResponsesFunctionCallsDoNotEmitProviderSpecificMCPToolViolatingScalarConstraints() throws {
+        let prepared = try OpenAICompatibility.prepareResponsesRequest(Data(#"""
+        {
+          "model":"composer-2.5",
+          "input":"use constrained search",
+          "tools":[
+            {
+              "type":"function",
+              "name":"mcp__search__query",
+              "parameters":{
+                "type":"object",
+                "additionalProperties":false,
+                "properties":{
+                  "query":{"type":"string","minLength":2,"maxLength":12,"pattern":"^[A-Za-z0-9_]+$"},
+                  "limit":{"type":"integer","minimum":1,"maximum":50,"multipleOf":5}
+                },
+                "required":["query","limit"]
+              }
+            }
+          ]
+        }
+        """#.utf8))
+        let toolCall = CursorToolCall(name: "mcp", arguments: [
+            "providerIdentifier": .string("search"),
+            "toolName": .string("query"),
+            "args": .object([
+                "query": .string("todo app"),
+                "limit": .number(7)
+            ])
+        ])
+
+        let object = OpenAICompatibility.responseObject(
+            id: "resp_mcp_scalar_invalid",
+            created: 1,
+            prepared: prepared,
+            output: CursorSDKOutput(text: "", toolCalls: [toolCall], agentID: "agent-test", runID: "run-test")
+        )
+
+        let outputItems = try XCTUnwrap(object["output"] as? [[String: Any]])
+        XCTAssertNil(outputItems.first { ($0["type"] as? String) == "function_call" })
     }
 
     func testResponsesFunctionCallsMapSDKPatchContentWithoutSeparatePathToPatchOnlyTool() throws {
