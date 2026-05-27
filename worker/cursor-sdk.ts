@@ -714,11 +714,14 @@ function isEmittableSdkToolCall(toolCall: CursorToolCall): boolean {
   if (name === "glob") return true;
   if (name === "ls") return true;
   if (name === "shell") return hasStringArg(args, "command");
-  if (name === "write") return hasStringArg(args, "path") && hasStringArg(args, "fileText");
+  if (name === "write") return hasStringArg(args, "path") && hasStringArgAllowEmpty(args, "fileText");
   if (name === "edit") {
+    const hasCompleteReplacement =
+      (hasStringArgAllowEmpty(args, "oldText") || hasStringArgAllowEmpty(args, "oldString")) &&
+      (hasStringArgAllowEmpty(args, "newText") || hasStringArgAllowEmpty(args, "newString"));
     return (
       hasStringArg(args, "path") &&
-      (hasStringArg(args, "patchContent") || hasStringArg(args, "oldText") || hasStringArg(args, "newText") || hasStringArg(args, "streamContent"))
+      (hasStringArgAllowEmpty(args, "patchContent") || hasStringArgAllowEmpty(args, "streamContent") || hasCompleteReplacement)
     );
   }
   if (name === "read" || name === "delete") return hasStringArg(args, "path");
@@ -731,6 +734,10 @@ function isEmittableSdkToolCall(toolCall: CursorToolCall): boolean {
 
 function hasStringArg(args: Record<string, unknown>, key: string): boolean {
   return typeof args[key] === "string" && args[key].trim().length > 0;
+}
+
+function hasStringArgAllowEmpty(args: Record<string, unknown>, key: string): boolean {
+  return typeof args[key] === "string";
 }
 
 function sdkPrompt(prompt: { text: string; images?: CursorImage[] }): string {

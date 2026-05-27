@@ -203,7 +203,7 @@ export function prepareOpencodeSdkChatRequest(body: unknown, cursorModel: { id: 
       const toolName = typeof item.name === "string" ? item.name : "";
       const label = [toolName ? `name=${toolName}` : "", toolCallId ? `tool_call_id=${toolCallId}` : ""].filter(Boolean).join(" ");
       transcript.push(`TOOL RESULT${label ? ` (${label})` : ""}: ${text || "[empty]"}`);
-      transcript.push(`LOCAL OPENCODE TOOL RESULT: ${JSON.stringify(sdkToolResultFeedback(toolCallId, toolName, text, toolCallById))}`);
+      transcript.push(`LOCAL OPENCODE TOOL RESULT: ${JSON.stringify(sdkToolResultFeedback(toolCallId, toolName, text, toolCallById, tools))}`);
     } else {
       transcript.push(`${role.toUpperCase()}: ${text || "[empty]"}`);
     }
@@ -256,7 +256,7 @@ export function prepareResponsesRequest(
   if (instructions) transcript.push("", `INSTRUCTIONS:\n${instructions}`);
   transcript.push("", "INPUT:");
   const effectiveInput = responseInputWithPrevious(record.input, options);
-  const { text, images } = responseInputToTextAndImages(effectiveInput);
+  const { text, images } = responseInputToTextAndImages(effectiveInput, tools);
   transcript.push(text || "[empty]");
   appendResponseOptions(transcript, record);
   const prompt = transcript.join("\n");
@@ -1019,7 +1019,7 @@ function appendJsonConstraint(constraints: string[], format: unknown) {
   }
 }
 
-function responseInputToTextAndImages(input: unknown): { text: string; images: CursorImage[] } {
+function responseInputToTextAndImages(input: unknown, tools: OpenAiToolSpec[] = []): { text: string; images: CursorImage[] } {
   if (typeof input === "string") return { text: input, images: [] };
   if (!Array.isArray(input)) return { text: input === undefined ? "" : JSON.stringify(input), images: [] };
   const lines: string[] = [];
@@ -1052,7 +1052,7 @@ function responseInputToTextAndImages(input: unknown): { text: string; images: C
       const remembered = toolCallById.get(callId);
       const label = [remembered?.name ? `name=${remembered.name}` : "", callId ? `tool_call_id=${callId}` : ""].filter(Boolean).join(" ");
       lines.push(`TOOL RESULT${label ? ` (${label})` : ""}: ${output || "[empty]"}`);
-      lines.push(`LOCAL TOOL RESULT: ${JSON.stringify(sdkToolResultFeedback(callId, remembered?.name || "", output, toolCallById))}`);
+      lines.push(`LOCAL TOOL RESULT: ${JSON.stringify(sdkToolResultFeedback(callId, remembered?.name || "", output, toolCallById, tools))}`);
     } else {
       lines.push(JSON.stringify(record));
     }
@@ -1423,19 +1423,26 @@ function sdkToolResultFeedback(
   toolCallId: string,
   fallbackToolName: string,
   resultText: string,
-  toolCallById: Map<string, { name: string; args: Record<string, unknown> }>
+  toolCallById: Map<string, { name: string; args: Record<string, unknown> }>,
+  tools: OpenAiToolSpec[] = []
 ): Record<string, unknown> {
   const original = toolCallById.get(toolCallId);
   const name = original?.name || fallbackToolName || "unknown";
   const args = original?.args ?? {};
+  const tool = toolSpecByName(tools, name);
   return {
     type: "tool_call",
     call_id: toolCallId || "unknown",
     name: sdkToolNameForOpenCodeTool(name),
     status: "completed",
-    args: openCodeArgsToSdkArgs(name, args),
+    args: openCodeArgsToSdkArgs(name, args, tool),
     result: openCodeToolResultToSdkResult(name, args, resultText)
   };
+}
+
+function toolSpecByName(tools: OpenAiToolSpec[], name: string): OpenAiToolSpec | undefined {
+  const normalized = normalizeToolName(name);
+  return tools.find((tool) => normalizeToolName(tool.name) === normalized);
 }
 
 function sdkToolNameForOpenCodeTool(name: string): string {
@@ -1451,7 +1458,7 @@ function sdkToolNameForOpenCodeTool(name: string): string {
   return name;
 }
 
-function openCodeArgsToSdkArgs(toolName: string, args: Record<string, unknown>): Record<string, unknown> {
+function openCodeArgsToSdkArgs(toolName: string, args: Record<string, unknown>, tool?: OpenAiToolSpec): Record<string, unknown> {
   const mcpTarget = mcpTargetForClientToolName(toolName);
   if (mcpTarget) {
     return {
@@ -1462,10 +1469,11 @@ function openCodeArgsToSdkArgs(toolName: string, args: Record<string, unknown>):
   }
   const normalized = normalizeToolName(toolName);
   if (["bash", "shell", "terminal"].includes(normalized)) {
+    const timeout = firstNumberNamedArg(args, "timeout", "timeoutMs", "timeout_ms", "timeoutSeconds", "timeout_seconds");
     return compactRecord({
       command: firstStringArg(args, "command", "cmd", "script"),
       workingDirectory: firstStringArg(args, "cwd", "workingDirectory", "directory", "path"),
-      timeout: firstNumberArg(args, "timeout")
+      timeout: sdkTimeoutArgument(timeout, tool)
     });
   }
   if (["write", "writefile"].includes(normalized)) {
@@ -1619,6 +1627,31 @@ function firstNumberArg(args: Record<string, unknown>, ...keys: string[]): numbe
     if (typeof value === "number" && Number.isFinite(value)) return value;
   }
   return undefined;
+}
+
+function firstNumberNamedArg(args: Record<string, unknown>, ...keys: string[]): { key: string; value: number } | undefined {
+  for (const key of keys) {
+    const value = args[key];
+    if (typeof value === "number" && Number.isFinite(value)) return { key, value };
+  }
+  const normalizedKeys = new Set(keys.map(normalizeToolName));
+  for (const [key, value] of Object.entries(args)) {
+    if (normalizedKeys.has(normalizeToolName(key)) && typeof value === "number" && Number.isFinite(value)) {
+      return { key, value };
+    }
+  }
+  return undefined;
+}
+
+function sdkTimeoutArgument(argument: { key: string; value: number } | undefined, tool: OpenAiToolSpec | undefined): number | undefined {
+  if (!argument) return undefined;
+  const source = normalizeToolName(argument.key);
+  if (["timeoutms", "timeoutmilliseconds", "milliseconds"].includes(source)) return argument.value;
+  if (["timeoutseconds", "seconds"].includes(source)) return argument.value * 1000;
+  const schema = toolParameterSchema(tool);
+  const normalizedProperties = new Map(schema.properties.map((property) => [normalizeToolName(property), property]));
+  const target = firstMatchingProperty(["timeout", "timeoutMs", "timeout_ms", "timeoutSeconds", "timeout_seconds"], schema.properties, normalizedProperties) || argument.key;
+  return toolPropertyPrefersSecondsTimeout(tool, target) ? argument.value * 1000 : argument.value;
 }
 
 function firstBooleanArg(args: Record<string, unknown>, ...keys: string[]): boolean | undefined {
@@ -1867,7 +1900,7 @@ function normalizeToolArguments(
     }
     const previous = priorities.get(mapped.target) ?? -1;
     if (mapped.priority >= previous) {
-      output[mapped.target] = normalizeToolArgumentValue(value, mapped.target, tool, context);
+      output[mapped.target] = normalizeToolArgumentValue(value, mapped.target, tool, context, key);
       priorities.set(mapped.target, mapped.priority);
     }
   }
@@ -1957,7 +1990,7 @@ function shellFallbackArguments(
   if (workdirKey && shouldIncludeOptionalPath(workdir)) output[workdirKey] = workdir;
   const timeout = firstArg(args, ["timeout", "timeoutMs", "timeout_ms", "timeoutSeconds", "timeout_seconds"]);
   const timeoutKey = firstMatchingProperty(["timeout", "timeoutMs", "timeout_ms", "timeoutSeconds", "timeout_seconds"], schema.properties, normalizedProperties);
-  if (timeoutKey && timeout !== undefined) output[timeoutKey] = timeout;
+  if (timeoutKey && timeout !== undefined) output[timeoutKey] = normalizeToolArgumentValue(timeout, timeoutKey, tool);
   const descriptionKey = firstMatchingProperty(["description"], schema.properties, normalizedProperties);
   if (descriptionKey) output[descriptionKey] = shellDescription(command);
   return sanitizeNormalizedToolArguments(applyRequiredToolDefaults(output, schema.required, tool, args), tool, args);
@@ -2292,10 +2325,35 @@ function toolPropertySchema(tool: OpenAiToolSpec | undefined, property: string):
   return properties?.[property];
 }
 
-function normalizeToolArgumentValue(value: unknown, targetProperty: string, tool: OpenAiToolSpec | undefined, context?: ToolCallContext): unknown {
+function normalizeToolArgumentValue(
+  value: unknown,
+  targetProperty: string,
+  tool: OpenAiToolSpec | undefined,
+  context?: ToolCallContext,
+  sourceProperty?: string
+): unknown {
+  if (typeof value === "number" && Number.isFinite(value) && toolPropertyPrefersSecondsTimeout(tool, targetProperty)) {
+    return normalizeTimeoutForSecondsTool(value, sourceProperty);
+  }
   if (typeof value !== "string") return value;
   if (!toolPropertyPrefersAbsolutePath(tool, targetProperty)) return value;
   return absolutizeToolPath(value, context);
+}
+
+function normalizeTimeoutForSecondsTool(value: number, sourceProperty?: string): number {
+  const source = normalizeToolName(sourceProperty || "");
+  if (["timeoutseconds", "seconds"].includes(source)) return value;
+  if (["timeoutms", "timeoutmilliseconds", "milliseconds"].includes(source)) return Math.max(1, Math.ceil(value / 1000));
+  return value >= 1000 ? Math.max(1, Math.ceil(value / 1000)) : value;
+}
+
+function toolPropertyPrefersSecondsTimeout(tool: OpenAiToolSpec | undefined, property: string): boolean {
+  const normalizedProperty = normalizeToolName(property);
+  if (!["timeout", "timeoutseconds", "seconds"].includes(normalizedProperty)) return false;
+  if (["timeoutseconds", "seconds"].includes(normalizedProperty)) return true;
+  const schema = toolPropertySchema(tool, property);
+  const description = isRecord(schema) && typeof schema.description === "string" ? schema.description.toLowerCase() : "";
+  return /\bseconds?\b/.test(description) && !/\bmilliseconds?\b|\bms\b/.test(description);
 }
 
 function toolPropertyPrefersAbsolutePath(tool: OpenAiToolSpec | undefined, property: string): boolean {

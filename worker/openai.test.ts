@@ -280,7 +280,14 @@ describe("OpenAI compatibility adapter", () => {
     const toolCalls = toOpenAiToolCalls({
       responseId: "chatcmpl_test",
       tools: [
-        { name: "bash", parameters: { type: "object", properties: { command: { type: "string" }, timeout: { type: "number" } }, required: ["command"] } },
+        {
+          name: "bash",
+          parameters: {
+            type: "object",
+            properties: { command: { type: "string" }, timeout: { type: "number", description: "Timeout in seconds (optional, no default timeout)" } },
+            required: ["command"]
+          }
+        },
         {
           name: "read",
           parameters: { type: "object", properties: { path: { type: "string" }, offset: { type: "number" }, limit: { type: "number" } }, required: ["path"] }
@@ -328,7 +335,7 @@ describe("OpenAI compatibility adapter", () => {
 
     expect(toolCalls.map((call) => call.function.name)).toEqual(["bash", "read", "write", "edit", "find", "grep", "ls"]);
     expect(toolCalls.map((call) => JSON.parse(call.function.arguments))).toEqual([
-      { command: "npm test", timeout: 120_000 },
+      { command: "npm test", timeout: 120 },
       { path: "src/App.tsx", offset: 5, limit: 20 },
       { path: "src/App.tsx", content: "export default function App() { return null }" },
       { path: "src/App.tsx", oldText: "return null", newText: "return <main />" },
@@ -1147,6 +1154,43 @@ describe("OpenAI compatibility adapter", () => {
     ]);
   });
 
+  it("feeds Responses pi bash outputs back with SDK millisecond timeout arguments", () => {
+    const prepared = prepareResponsesRequest(
+      {
+        model: "composer-2.5",
+        input: [
+          { role: "user", content: "run tests" },
+          { type: "function_call", call_id: "call_bash", name: "bash", arguments: "{\"command\":\"npm test\",\"timeout\":120}" },
+          { type: "function_call_output", call_id: "call_bash", output: "{\"exitCode\":0,\"stdout\":\"ok\",\"stderr\":\"\"}" }
+        ],
+        tools: [
+          {
+            type: "function",
+            name: "bash",
+            parameters: {
+              type: "object",
+              properties: {
+                command: { type: "string" },
+                timeout: { type: "number", description: "Timeout in seconds (optional, no default timeout)" }
+              },
+              required: ["command"]
+            }
+          }
+        ]
+      },
+      { id: "composer-2.5" }
+    );
+
+    const line = prepared.prompt.text
+      .split("\n")
+      .find((item) => item.startsWith("LOCAL TOOL RESULT: "));
+    expect(line).toBeTruthy();
+    const feedback = JSON.parse(line!.slice("LOCAL TOOL RESULT: ".length));
+    expect(feedback.name).toBe("shell");
+    expect(feedback.args).toEqual({ command: "npm test", timeout: 120_000 });
+    expect(feedback.result.value).toMatchObject({ exitCode: 0, stdout: "ok", stderr: "" });
+  });
+
   it("returns OpenAI-shaped response objects", () => {
     const chat = chatCompletionResponse({
       id: "chatcmpl_test",
@@ -1676,6 +1720,55 @@ describe("OpenAI compatibility adapter", () => {
     expect(feedback.args).toEqual({ targetDirectory: "src", globPattern: "**/*.tsx" });
     expect(feedback.result.value.files).toEqual(["src/App.tsx"]);
     expect(feedback.result.value.totalFiles).toBe(1);
+  });
+
+  it("feeds pi bash results back with SDK millisecond timeout arguments", () => {
+    const prepared = prepareOpencodeSdkChatRequest(
+      {
+        model: "composer-2.5-sdk",
+        messages: [
+          { role: "user", content: "run tests" },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "call_bash",
+                type: "function",
+                function: {
+                  name: "bash",
+                  arguments: JSON.stringify({ command: "npm test", timeout: 120 })
+                }
+              }
+            ]
+          },
+          { role: "tool", tool_call_id: "call_bash", content: "{\"exitCode\":0,\"stdout\":\"ok\",\"stderr\":\"\"}" }
+        ],
+        tools: [
+          {
+            name: "bash",
+            input_schema: {
+              type: "object",
+              properties: {
+                command: { type: "string" },
+                timeout: { type: "number", description: "Timeout in seconds (optional, no default timeout)" }
+              },
+              required: ["command"]
+            }
+          }
+        ]
+      },
+      { id: "composer-2.5-sdk" }
+    );
+
+    const line = prepared.prompt.text
+      .split("\n")
+      .find((item) => item.startsWith("LOCAL OPENCODE TOOL RESULT: "));
+    expect(line).toBeTruthy();
+    const feedback = JSON.parse(line!.slice("LOCAL OPENCODE TOOL RESULT: ".length));
+    expect(feedback.name).toBe("shell");
+    expect(feedback.args).toEqual({ command: "npm test", timeout: 120_000 });
+    expect(feedback.result.value).toMatchObject({ exitCode: 0, stdout: "ok", stderr: "" });
   });
 
   it("feeds pi edit results back with SDK edit argument names", () => {

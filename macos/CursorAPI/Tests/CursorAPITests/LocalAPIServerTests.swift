@@ -1337,6 +1337,52 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertTrue(prepared.prompt.contains("/tmp/project"))
     }
 
+    func testResponsesPiBashOutputsFeedBackWithSDKMillisecondTimeout() throws {
+        let prepared = try OpenAICompatibility.prepareResponsesRequest(Data(#"""
+        {
+          "model": "composer-2.5",
+          "tools": [
+            {
+              "type": "function",
+              "name": "bash",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "command": { "type": "string" },
+                  "timeout": { "type": "number", "description": "Timeout in seconds (optional, no default timeout)" }
+                },
+                "required": ["command"]
+              }
+            }
+          ],
+          "input": [
+            {
+              "type": "function_call",
+              "call_id": "call_bash",
+              "name": "bash",
+              "arguments": "{\"command\":\"npm test\",\"timeout\":120}"
+            },
+            {
+              "type": "function_call_output",
+              "call_id": "call_bash",
+              "output": "{\"exitCode\":0,\"stdout\":\"ok\",\"stderr\":\"\"}"
+            }
+          ]
+        }
+        """#.utf8))
+
+        let prefix = "LOCAL TOOL RESULT: "
+        let feedbackLine = try XCTUnwrap(prepared.prompt.split(separator: "\n").first { $0.hasPrefix(prefix) })
+        let feedbackJSON = String(feedbackLine.dropFirst(prefix.count))
+        let feedbackData = Data(feedbackJSON.utf8)
+        let feedback = try XCTUnwrap(JSONSerialization.jsonObject(with: feedbackData) as? [String: Any])
+        let arguments = try XCTUnwrap(feedback["arguments"] as? [String: Any])
+
+        XCTAssertEqual(feedback["toolName"] as? String, "shell")
+        XCTAssertEqual(arguments["command"] as? String, "npm test")
+        XCTAssertEqual((arguments["timeout"] as? NSNumber)?.doubleValue, 120_000)
+    }
+
     func testResponsesAcceptsServerToolInputSchemasAndSkipsNamelessBuiltins() throws {
         let prepared = try OpenAICompatibility.prepareResponsesRequest(Data(#"""
         {
@@ -1969,6 +2015,59 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertEqual(arguments["targetDirectory"] as? String, "src")
         XCTAssertEqual(arguments["globPattern"] as? String, "**/*.tsx")
         XCTAssertNil(arguments["providerIdentifier"])
+    }
+
+    func testChatToolResultsFeedPiBashBackWithSDKMillisecondTimeout() throws {
+        let prepared = try OpenAICompatibility.prepareChatRequest(Data(#"""
+        {
+          "model":"composer-2.5",
+          "messages":[
+            {"role":"user","content":"run tests"},
+            {
+              "role":"assistant",
+              "content":null,
+              "tool_calls":[
+                {
+                  "id":"call_bash",
+                  "type":"function",
+                  "function":{
+                    "name":"bash",
+                    "arguments":"{\"command\":\"npm test\",\"timeout\":120}"
+                  }
+                }
+              ]
+            },
+            {"role":"tool","tool_call_id":"call_bash","content":"{\"exitCode\":0,\"stdout\":\"ok\",\"stderr\":\"\"}"}
+          ],
+          "tools":[
+            {
+              "type":"function",
+              "function":{
+                "name":"bash",
+                "parameters":{
+                  "type":"object",
+                  "properties":{
+                    "command":{"type":"string"},
+                    "timeout":{"type":"number","description":"Timeout in seconds (optional, no default timeout)"}
+                  },
+                  "required":["command"]
+                }
+              }
+            }
+          ]
+        }
+        """#.utf8))
+
+        let prefix = "LOCAL TOOL RESULT: "
+        let feedbackLine = try XCTUnwrap(prepared.prompt.split(separator: "\n").first { $0.hasPrefix(prefix) })
+        let feedbackJSON = String(feedbackLine.dropFirst(prefix.count))
+        let feedbackData = Data(feedbackJSON.utf8)
+        let feedback = try XCTUnwrap(JSONSerialization.jsonObject(with: feedbackData) as? [String: Any])
+        let arguments = try XCTUnwrap(feedback["arguments"] as? [String: Any])
+
+        XCTAssertEqual(feedback["toolName"] as? String, "shell")
+        XCTAssertEqual(arguments["command"] as? String, "npm test")
+        XCTAssertEqual((arguments["timeout"] as? NSNumber)?.doubleValue, 120_000)
     }
 
     func testChatToolResultsFeedPiEditBackWithSDKArgumentNames() throws {
@@ -3606,7 +3705,7 @@ final class LocalAPIServerTests: XCTestCase {
           "model":"composer-2.5",
           "messages":[{"role":"user","content":"work in the project"}],
           "tools":[
-            {"type":"function","function":{"name":"bash","parameters":{"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"number"}},"required":["command"]}}},
+            {"type":"function","function":{"name":"bash","parameters":{"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"number","description":"Timeout in seconds (optional, no default timeout)"}},"required":["command"]}}},
             {"type":"function","function":{"name":"read","parameters":{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"number"},"limit":{"type":"number"}},"required":["path"]}}},
             {"type":"function","function":{"name":"write","parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}}},
             {"type":"function","function":{"name":"edit","parameters":{"type":"object","properties":{"path":{"type":"string"},"oldText":{"type":"string"},"newText":{"type":"string"}},"required":["path","oldText","newText"]}}},
@@ -3647,7 +3746,7 @@ final class LocalAPIServerTests: XCTestCase {
 
         let arguments = try toolCalls.map { try decodedArguments(try XCTUnwrap($0["function"] as? [String: Any])) }
         XCTAssertEqual(arguments[0]["command"] as? String, "npm test")
-        XCTAssertEqual((arguments[0]["timeout"] as? NSNumber)?.doubleValue, 120_000)
+        XCTAssertEqual((arguments[0]["timeout"] as? NSNumber)?.doubleValue, 120)
         XCTAssertEqual(arguments[1]["path"] as? String, "src/App.tsx")
         XCTAssertEqual((arguments[1]["offset"] as? NSNumber)?.doubleValue, 5)
         XCTAssertEqual((arguments[1]["limit"] as? NSNumber)?.doubleValue, 20)

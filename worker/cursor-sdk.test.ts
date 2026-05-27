@@ -4,13 +4,16 @@ import { cursorSdkTestExports } from "./cursor-sdk";
 describe("Cursor SDK harness", () => {
   it("does not emit incomplete SDK tool-call starts to OpenCode", () => {
     expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "edit", arguments: {} })).toBe(false);
+    expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "edit", arguments: { path: "package.json", oldText: "old" } })).toBe(false);
+    expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "edit", arguments: { path: "package.json", newText: "new" } })).toBe(false);
     expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "write", arguments: { path: "package.json" } })).toBe(false);
     expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "shell", arguments: {} })).toBe(false);
   });
 
   it("allows SDK tool calls once required execution arguments are available", () => {
     expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "glob", arguments: {} })).toBe(true);
-    expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "write", arguments: { path: "package.json", fileText: "{}" } })).toBe(true);
+    expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "write", arguments: { path: "package.json", fileText: "" } })).toBe(true);
+    expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "edit", arguments: { path: "package.json", oldText: "", newText: "{}" } })).toBe(true);
     expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "shell", arguments: { command: "npm test" } })).toBe(true);
   });
 

@@ -142,7 +142,7 @@ public enum OpenAICompatibility {
                     .compactMap { $0 }
                     .joined(separator: " ")
                 transcript.append("TOOL RESULT\(label.isEmpty ? "" : " (\(label))"): \(text.isEmpty ? "[empty]" : text)")
-                transcript.append("LOCAL TOOL RESULT: \(toolResultFeedback(toolCallID: toolCallID, toolName: toolName, text: text, remembered: rememberedToolCalls))")
+                transcript.append("LOCAL TOOL RESULT: \(toolResultFeedback(toolCallID: toolCallID, toolName: toolName, text: text, remembered: rememberedToolCalls, tools: tools))")
             } else {
                 transcript.append("\(role.uppercased()): \(text.isEmpty ? "[empty]" : text)")
                 if role == "user", !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -291,7 +291,7 @@ public enum OpenAICompatibility {
         var rememberedToolCalls = rememberedToolCalls
         let input = raw["input"]
         let latestUserText = latestUserText(from: input)
-        let appendedInput = appendResponsesInput(input, to: &transcript, remembered: &rememberedToolCalls)
+        let appendedInput = appendResponsesInput(input, to: &transcript, remembered: &rememberedToolCalls, tools: tools)
         if !appendedInput.appended {
             transcript.append("[empty]")
         }
@@ -1024,7 +1024,8 @@ public enum OpenAICompatibility {
     private static func appendResponsesInput(
         _ value: Any?,
         to transcript: inout [String],
-        remembered: inout [String: ResponseToolCallMemory]
+        remembered: inout [String: ResponseToolCallMemory],
+        tools: [OpenAIToolSpec] = []
     ) -> ResponsesInputAppendResult {
         if let value = value as? String {
             transcript.append(value.isEmpty ? "[empty]" : value)
@@ -1059,7 +1060,7 @@ public enum OpenAICompatibility {
                         .compactMap { $0 }
                         .joined(separator: " ")
                     transcript.append("FUNCTION CALL OUTPUT\(label.isEmpty ? "" : " (\(label))"): \(output.isEmpty ? "[empty]" : output)")
-                    transcript.append("LOCAL TOOL RESULT: \(toolResultFeedback(toolCallID: callID, toolName: toolName, text: output, remembered: remembered))")
+                    transcript.append("LOCAL TOOL RESULT: \(toolResultFeedback(toolCallID: callID, toolName: toolName, text: output, remembered: remembered, tools: tools))")
                     continue
                 }
                 if type == "compaction" {
@@ -1083,7 +1084,7 @@ public enum OpenAICompatibility {
             var appended = false
             var sawToolOutput = false
             for item in items {
-                let result = appendResponsesInput(item, to: &transcript, remembered: &remembered)
+                let result = appendResponsesInput(item, to: &transcript, remembered: &remembered, tools: tools)
                 appended = result.appended || appended
                 sawToolOutput = result.sawToolOutput || sawToolOutput
             }
@@ -1536,19 +1537,26 @@ public enum OpenAICompatibility {
         toolCallID: String,
         toolName: String,
         text: String,
-        remembered: [String: ResponseToolCallMemory]
+        remembered: [String: ResponseToolCallMemory],
+        tools: [OpenAIToolSpec] = []
     ) -> String {
         let rememberedCall = remembered[toolCallID]
         let clientToolName = toolName.isEmpty ? rememberedCall?.name ?? "" : toolName
         let arguments = rememberedCall?.arguments ?? [:]
+        let tool = toolSpec(named: clientToolName, in: tools)
         let record: [String: Any] = [
             "toolCallId": toolCallID,
             "toolName": sdkFeedbackToolName(for: clientToolName),
-            "arguments": sdkFeedbackArguments(for: clientToolName, arguments: arguments).mapValues(\.foundationValue),
+            "arguments": sdkFeedbackArguments(for: clientToolName, arguments: arguments, tool: tool).mapValues(\.foundationValue),
             "result": text
         ]
         let data = (try? JSONSerialization.data(withJSONObject: record, options: [.withoutEscapingSlashes])) ?? Data("{}".utf8)
         return String(data: data, encoding: .utf8) ?? "{}"
+    }
+
+    private static func toolSpec(named name: String, in tools: [OpenAIToolSpec]) -> OpenAIToolSpec? {
+        let normalized = normalizedName(name)
+        return tools.first { normalizedName($0.name) == normalized }
     }
 
     private static func sdkFeedbackToolName(for clientToolName: String) -> String {
@@ -1562,7 +1570,7 @@ public enum OpenAICompatibility {
         return clientToolName
     }
 
-    private static func sdkFeedbackArguments(for clientToolName: String, arguments: [String: JSONValue]) -> [String: JSONValue] {
+    private static func sdkFeedbackArguments(for clientToolName: String, arguments: [String: JSONValue], tool: OpenAIToolSpec? = nil) -> [String: JSONValue] {
         if let target = mcpTarget(forClientToolName: clientToolName) {
             return [
                 "providerIdentifier": .string(target.provider),
@@ -1575,7 +1583,7 @@ public enum OpenAICompatibility {
             return compactJSON([
                 "command": firstArgument(in: arguments, keys: ["command", "cmd", "script", "input"])?.value,
                 "workingDirectory": firstArgument(in: arguments, keys: ["cwd", "workingDirectory", "working_directory", "directory", "path"])?.value,
-                "timeout": firstArgument(in: arguments, keys: ["timeout"])?.value
+                "timeout": sdkTimeoutArgument(firstArgument(in: arguments, keys: ["timeout", "timeoutMs", "timeout_ms", "timeoutSeconds", "timeout_seconds"]), tool: tool)
             ])
         case "write":
             return compactJSON([
@@ -1621,6 +1629,24 @@ public enum OpenAICompatibility {
         default:
             return arguments
         }
+    }
+
+    private static func sdkTimeoutArgument(_ argument: NamedArgument?, tool: OpenAIToolSpec?) -> JSONValue? {
+        guard let argument else { return nil }
+        guard case .number(let number) = argument.value else { return argument.value }
+        let source = normalizedName(argument.key)
+        if ["timeoutms", "timeoutmilliseconds", "milliseconds"].contains(source) {
+            return .number(number)
+        }
+        if ["timeoutseconds", "seconds"].contains(source) {
+            return .number(number * 1000)
+        }
+        guard let tool else {
+            return .number(number)
+        }
+        let properties = parameterPropertyNames(tool)
+        let target = propertyName(matching: ["timeout", "timeoutMs", "timeout_ms", "timeoutSeconds", "timeout_seconds"], in: properties) ?? argument.key
+        return toolPropertyPrefersSecondsTimeout(tool: tool, property: target) ? .number(number * 1000) : .number(number)
     }
 
     private static func compactJSON(_ values: [String: JSONValue?]) -> [String: JSONValue] {
@@ -1883,7 +1909,7 @@ public enum OpenAICompatibility {
                 consumed.insert(source)
                 return
             }
-            output[target] = normalizeToolArgumentValue(value, property: target, tool: tool, context: context)
+            output[target] = normalizeToolArgumentValue(value, property: target, tool: tool, context: context, sourceProperty: source)
             consumed.insert(source)
         }
 
@@ -1893,7 +1919,7 @@ public enum OpenAICompatibility {
                 consumed.insert(argument.key)
                 return
             }
-            output[target] = normalizeToolArgumentValue(argument.value, property: target, tool: tool, context: context)
+            output[target] = normalizeToolArgumentValue(argument.value, property: target, tool: tool, context: context, sourceProperty: argument.key)
             consumed.insert(argument.key)
         }
 
@@ -1908,7 +1934,7 @@ public enum OpenAICompatibility {
                 let command = commandKey.flatMap { output[$0]?.stringValue } ?? "shell command"
                 output[descriptionKey] = .string(shellToolDescription(for: command))
             }
-            fillRequiredShellArguments(&output, source: arguments, properties: properties, required: required)
+            fillRequiredShellArguments(&output, source: arguments, properties: properties, required: required, tool: tool)
         case "write":
             copy("path", as: pathPropertyAliases())
             copy("fileText", as: ["file_text", "content", "contents", "text", "fileContent", "file_content"])
@@ -2043,14 +2069,14 @@ public enum OpenAICompatibility {
            shouldIncludeOptionalPath(workdir) {
             output[workdirKey] = workdir
         }
-        if let timeout = firstArgument(in: arguments, keys: ["timeout", "timeoutMs", "timeout_ms", "timeoutSeconds", "timeout_seconds"])?.value,
+        if let timeoutArgument = firstArgument(in: arguments, keys: ["timeout", "timeoutMs", "timeout_ms", "timeoutSeconds", "timeout_seconds"]),
            let timeoutKey = propertyName(matching: ["timeout", "timeoutMs", "timeout_ms", "timeoutSeconds", "timeout_seconds"], in: properties) {
-            output[timeoutKey] = timeout
+            output[timeoutKey] = normalizeToolArgumentValue(timeoutArgument.value, property: timeoutKey, tool: tool, context: nil, sourceProperty: timeoutArgument.key)
         }
         if let descriptionKey = propertyName(matching: ["description"], in: properties) {
             output[descriptionKey] = .string(shellToolDescription(for: command))
         }
-        fillRequiredShellArguments(&output, source: arguments, properties: properties, required: requiredParameterNames(tool))
+        fillRequiredShellArguments(&output, source: arguments, properties: properties, required: requiredParameterNames(tool), tool: tool)
         return output
     }
 
@@ -2162,7 +2188,8 @@ public enum OpenAICompatibility {
         _ output: inout [String: JSONValue],
         source: [String: JSONValue],
         properties: [String],
-        required: Set<String>
+        required: Set<String>,
+        tool: OpenAIToolSpec
     ) {
         guard !required.isEmpty else { return }
         if let workdirKey = propertyName(matching: ["workingDirectory", "working_directory", "workdir", "cwd", "directory"], in: properties),
@@ -2173,7 +2200,9 @@ public enum OpenAICompatibility {
         if let timeoutKey = propertyName(matching: ["timeout", "timeoutMs", "timeout_ms", "timeoutSeconds", "timeout_seconds"], in: properties),
            isRequired(timeoutKey, in: required),
            output[timeoutKey] == nil {
-            output[timeoutKey] = firstArgument(in: source, keys: ["timeout", "timeoutMs", "timeout_ms", "timeoutSeconds", "timeout_seconds"])?.value ?? .number(120_000)
+            let timeoutArgument = firstArgument(in: source, keys: ["timeout", "timeoutMs", "timeout_ms", "timeoutSeconds", "timeout_seconds"])
+            let timeout = timeoutArgument?.value ?? .number(120_000)
+            output[timeoutKey] = normalizeToolArgumentValue(timeout, property: timeoutKey, tool: tool, context: nil, sourceProperty: timeoutArgument?.key)
         }
         if let descriptionKey = propertyName(matching: ["description"], in: properties),
            isRequired(descriptionKey, in: required),
@@ -2269,12 +2298,43 @@ public enum OpenAICompatibility {
         return lower != "undefined" && lower != "null"
     }
 
-    private static func normalizeToolArgumentValue(_ value: JSONValue, property: String, tool: OpenAIToolSpec, context: ToolCallContext?) -> JSONValue {
+    private static func normalizeToolArgumentValue(_ value: JSONValue, property: String, tool: OpenAIToolSpec, context: ToolCallContext?, sourceProperty: String? = nil) -> JSONValue {
+        if case .number(let number) = value,
+           toolPropertyPrefersSecondsTimeout(tool: tool, property: property) {
+            return .number(normalizeTimeoutForSecondsTool(number, sourceProperty: sourceProperty))
+        }
         guard let string = value.stringValue,
               toolPropertyPrefersAbsolutePath(tool: tool, property: property) else {
             return value
         }
         return .string(absolutizeToolPath(string, context: context))
+    }
+
+    private static func normalizeTimeoutForSecondsTool(_ value: Double, sourceProperty: String?) -> Double {
+        let source = normalizedName(sourceProperty ?? "")
+        if ["timeoutseconds", "seconds"].contains(source) {
+            return value
+        }
+        if ["timeoutms", "timeoutmilliseconds", "milliseconds"].contains(source) {
+            return max(1, ceil(value / 1000))
+        }
+        return value >= 1000 ? max(1, ceil(value / 1000)) : value
+    }
+
+    private static func toolPropertyPrefersSecondsTimeout(tool: OpenAIToolSpec, property: String) -> Bool {
+        let normalizedProperty = normalizedName(property)
+        guard ["timeout", "timeoutseconds", "seconds"].contains(normalizedProperty) else {
+            return false
+        }
+        if ["timeoutseconds", "seconds"].contains(normalizedProperty) {
+            return true
+        }
+        guard case .object(let schema)? = parameterPropertySchema(property, tool: tool),
+              let description = schema["description"]?.stringValue?.lowercased() else {
+            return false
+        }
+        return description.range(of: #"\bseconds?\b"#, options: .regularExpression) != nil
+            && description.range(of: #"\b(milliseconds?|ms)\b"#, options: .regularExpression) == nil
     }
 
     private static func toolPropertyPrefersAbsolutePath(tool: OpenAIToolSpec, property: String) -> Bool {
