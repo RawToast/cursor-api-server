@@ -276,6 +276,14 @@ function clientForwardingMcpServerSource(clientTools = []) {
 const readline = require("node:readline");
 const tools = ${tools};
 const validateClientMcpToolCall = ${validateClientMcpToolCall.toString()};
+const validateJsonSchemaValue = ${validateJsonSchemaValue.toString()};
+const schemaTypes = ${schemaTypes.toString()};
+const schemaAllowsNull = ${schemaAllowsNull.toString()};
+const jsonValueMatchesType = ${jsonValueMatchesType.toString()};
+const jsonValuesEqual = ${jsonValuesEqual.toString()};
+const isRecord = ${isRecord.toString()};
+const stableJson = ${stableJson.toString()};
+const sortJson = ${sortJson.toString()};
 const rl = readline.createInterface({ input: process.stdin });
 function send(id, result) {
   if (id === undefined || id === null) return;
@@ -331,15 +339,131 @@ function validateClientMcpToolCall(tools, toolName, input = {}) {
     return `Unknown client MCP forwarding tool: ${toolName}`;
   }
   const schema = tool.inputSchema && typeof tool.inputSchema === "object" ? tool.inputSchema : {};
-  const required = Array.isArray(schema.required) ? schema.required.filter((key) => typeof key === "string" && key.trim()) : [];
-  if (!required.length) return null;
   const args = input && typeof input === "object" && !Array.isArray(input) ? input : {};
-  for (const key of required) {
-    if (!(key in args) || args[key] === undefined || args[key] === null) {
-      return `Missing required argument for ${toolName}: ${key}`;
+  return validateJsonSchemaValue(args, schema, toolName);
+}
+
+function validateJsonSchemaValue(value, schema, path) {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) return null;
+  if (Object.prototype.hasOwnProperty.call(schema, "const") && !jsonValuesEqual(value, schema.const)) {
+    return `Invalid value for ${path}: expected constant ${JSON.stringify(schema.const)}`;
+  }
+  if (Array.isArray(schema.enum) && !schema.enum.some((candidate) => jsonValuesEqual(candidate, value))) {
+    return `Invalid value for ${path}: expected one of ${schema.enum.map((item) => JSON.stringify(item)).join(", ")}`;
+  }
+
+  const anyOf = Array.isArray(schema.anyOf) ? schema.anyOf : [];
+  if (anyOf.length && !anyOf.some((candidate) => validateJsonSchemaValue(value, candidate, path) === null)) {
+    return `Invalid value for ${path}: did not match any allowed schema`;
+  }
+  const oneOf = Array.isArray(schema.oneOf) ? schema.oneOf : [];
+  if (oneOf.length && !oneOf.some((candidate) => validateJsonSchemaValue(value, candidate, path) === null)) {
+    return `Invalid value for ${path}: did not match any allowed schema`;
+  }
+  const allOf = Array.isArray(schema.allOf) ? schema.allOf : [];
+  for (const candidate of allOf) {
+    const error = validateJsonSchemaValue(value, candidate, path);
+    if (error) return error;
+  }
+
+  const types = schemaTypes(schema);
+  if (types.length && !types.some((type) => jsonValueMatchesType(value, type))) {
+    return `Invalid value for ${path}: expected ${types.join(" or ")}`;
+  }
+  if (value === null && schemaAllowsNull(schema)) return null;
+
+  const objectLike = schema.properties || schema.required || schema.additionalProperties !== undefined || types.includes("object");
+  if (objectLike) {
+    if (!isRecord(value)) return `Invalid value for ${path}: expected object`;
+    const properties = isRecord(schema.properties) ? schema.properties : {};
+    const required = Array.isArray(schema.required) ? schema.required.filter((key) => typeof key === "string" && key.trim()) : [];
+    for (const key of required) {
+      if (!(key in value) || value[key] === undefined || value[key] === null) {
+        return `Missing required argument for ${path}: ${key}`;
+      }
+    }
+    for (const [key, nestedValue] of Object.entries(value)) {
+      if (Object.prototype.hasOwnProperty.call(properties, key)) {
+        const error = validateJsonSchemaValue(nestedValue, properties[key], `${path}.${key}`);
+        if (error) return error;
+      } else if (schema.additionalProperties === false) {
+        return `Unexpected argument for ${path}: ${key}`;
+      } else if (isRecord(schema.additionalProperties)) {
+        const error = validateJsonSchemaValue(nestedValue, schema.additionalProperties, `${path}.${key}`);
+        if (error) return error;
+      }
     }
   }
+
+  const arrayLike = schema.items || schema.prefixItems || schema.minItems !== undefined || schema.maxItems !== undefined || types.includes("array");
+  if (arrayLike) {
+    if (!Array.isArray(value)) return `Invalid value for ${path}: expected array`;
+    if (Number.isInteger(schema.minItems) && value.length < schema.minItems) {
+      return `Invalid value for ${path}: expected at least ${schema.minItems} item${schema.minItems === 1 ? "" : "s"}`;
+    }
+    if (Number.isInteger(schema.maxItems) && value.length > schema.maxItems) {
+      return `Invalid value for ${path}: expected at most ${schema.maxItems} item${schema.maxItems === 1 ? "" : "s"}`;
+    }
+    const prefixItems = Array.isArray(schema.prefixItems) ? schema.prefixItems : [];
+    for (let index = 0; index < Math.min(prefixItems.length, value.length); index += 1) {
+      const error = validateJsonSchemaValue(value[index], prefixItems[index], `${path}[${index}]`);
+      if (error) return error;
+    }
+    if (schema.items === false && value.length > prefixItems.length) {
+      return `Unexpected array item for ${path}: ${prefixItems.length}`;
+    }
+    if (isRecord(schema.items)) {
+      for (let index = prefixItems.length; index < value.length; index += 1) {
+        const error = validateJsonSchemaValue(value[index], schema.items, `${path}[${index}]`);
+        if (error) return error;
+      }
+    }
+  }
+
   return null;
+}
+
+function schemaTypes(schema) {
+  if (typeof schema.type === "string") return [schema.type];
+  if (Array.isArray(schema.type)) return schema.type.filter((type) => typeof type === "string");
+  return [];
+}
+
+function schemaAllowsNull(schema) {
+  if (schemaTypes(schema).includes("null")) return true;
+  for (const key of ["anyOf", "oneOf"]) {
+    const variants = Array.isArray(schema[key]) ? schema[key] : [];
+    if (variants.some((candidate) => candidate && typeof candidate === "object" && schemaAllowsNull(candidate))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function jsonValueMatchesType(value, type) {
+  switch (type) {
+    case "string":
+      return typeof value === "string";
+    case "number":
+      return typeof value === "number" && Number.isFinite(value);
+    case "integer":
+      return Number.isInteger(value);
+    case "boolean":
+      return typeof value === "boolean";
+    case "array":
+      return Array.isArray(value);
+    case "object":
+      return isRecord(value);
+    case "null":
+      return value === null;
+    default:
+      return true;
+  }
+}
+
+function jsonValuesEqual(left, right) {
+  if (Object.is(left, right)) return true;
+  return stableJson(left) === stableJson(right);
 }
 
 function clientMcpToolDefinitions(clientTools = []) {
