@@ -160,21 +160,34 @@ describe("Cursor SDK local-agent bridge", () => {
     expect(isForwardableSDKToolCall({ name: "glob", arguments: { targeting: "/tmp/project/src/**/*.tsx" } })).toBe(true);
   });
 
-  it("extracts partial tool calls without treating tool-call starts as complete", () => {
+  it("ignores partial SDK tool calls even when their partial arguments look forwardable", () => {
     const update = {
       type: "partial-tool-call",
       toolCall: {
-        type: "glob",
-        args: { targeting: "src" }
+        type: "shell",
+        args: { command: "cat > package.json <<'EOF'\n{\"scripts\"" }
       }
     };
+
+    expect(toolCallFromDelta(update)).toBe(null);
+  });
+
+  it("extracts SDK tool-call starts for early bridge-side cancellation", () => {
+    const update = {
+      type: "tool-call-started",
+      toolCall: {
+        type: "shell",
+        args: { command: "printf OK" }
+      }
+    };
+
     const normalized = normalizeSDKToolCall(toolCallFromDelta(update));
 
     expect(normalized).toEqual({
-      name: "glob",
-      arguments: { targeting: "src" }
+      name: "shell",
+      arguments: { command: "printf OK" }
     });
-    expect(isForwardableSDKToolCall(normalized)).toBe(false);
+    expect(isForwardableSDKToolCall(normalized)).toBe(true);
   });
 
   it("requires both provider and tool names for SDK MCP forwarding", () => {

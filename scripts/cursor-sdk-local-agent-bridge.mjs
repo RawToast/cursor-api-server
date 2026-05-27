@@ -301,6 +301,7 @@ async function runLocalAgentBody(input, onRun, onEvent) {
         continue;
       }
       if (event.type === "tool_call") {
+        if (event.status && event.status !== "running") continue;
         await captureToolCall({ type: event.name, args: event.args });
         if (capturedToolCall) break;
       }
@@ -1361,7 +1362,7 @@ function bridgePrompt(prompt) {
 
 function toolCallFromDelta(update) {
   if (!update || typeof update !== "object") return null;
-  if (update.type !== "partial-tool-call" && update.type !== "tool-call-started") return null;
+  if (update.type !== "tool-call-started") return null;
   const toolCall = update.toolCall;
   if (!toolCall || typeof toolCall !== "object") return null;
   return toolCall;
