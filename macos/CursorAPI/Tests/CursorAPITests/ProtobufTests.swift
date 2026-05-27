@@ -143,7 +143,7 @@ final class ProtobufTests: XCTestCase {
     func testSDKToolCallEmissionRequiresCompleteExecutableArguments() {
         XCTAssertFalse(CursorSDKToolSpec.isEmittable(CursorToolCall(name: "glob", arguments: [:])))
         XCTAssertTrue(CursorSDKToolSpec.isEmittable(CursorToolCall(name: "glob", arguments: ["globPattern": .string("**/*.tsx")])))
-        XCTAssertTrue(CursorSDKToolSpec.isEmittable(CursorToolCall(name: "glob", arguments: ["targetDirectory": .string("src")])))
+        XCTAssertFalse(CursorSDKToolSpec.isEmittable(CursorToolCall(name: "glob", arguments: ["targetDirectory": .string("src")])))
         XCTAssertTrue(CursorSDKToolSpec.isEmittable(CursorToolCall(name: "glob", arguments: ["targetDirectory": .string("src/**/*.tsx")])))
 
         XCTAssertFalse(CursorSDKToolSpec.isEmittable(CursorToolCall(name: "edit", arguments: ["path": .string("src/App.tsx"), "oldText": .string("old")])))

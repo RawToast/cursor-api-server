@@ -8,7 +8,7 @@ export default defineConfig({
   },
   test: {
     environment: "node",
-    include: ["worker/**/*.test.ts", "src/**/*.test.ts"],
+    include: ["worker/**/*.test.ts", "src/**/*.test.ts", "scripts/**/*.test.mjs"],
     testTimeout: 10000
   }
 });

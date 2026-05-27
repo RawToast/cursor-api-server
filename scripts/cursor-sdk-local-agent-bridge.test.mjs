@@ -1,0 +1,75 @@
+import { describe, expect, it } from "vitest";
+import { bridgePrompt, isForwardableSDKToolCall, normalizeSDKToolCall, toolCallFromDelta } from "./cursor-sdk-local-agent-bridge.mjs";
+
+describe("Cursor SDK local-agent bridge", () => {
+  it("does not cancel SDK glob calls on directory-only partial arguments", () => {
+    const partial = normalizeSDKToolCall({
+      type: "glob",
+      args: { targetDirectory: "." }
+    });
+
+    expect(partial).toEqual({
+      name: "glob",
+      arguments: { targetDirectory: "." }
+    });
+    expect(isForwardableSDKToolCall(partial)).toBe(false);
+  });
+
+  it("allows SDK glob calls once a real pattern is present", () => {
+    expect(isForwardableSDKToolCall({ name: "glob", arguments: { globPattern: "**/*.tsx", targetDirectory: "." } })).toBe(true);
+    expect(isForwardableSDKToolCall({ name: "glob", arguments: { glob_pattern: "*.tsx", targeting: "src" } })).toBe(true);
+    expect(isForwardableSDKToolCall({ name: "glob", arguments: { targeting: "/tmp/project/src/**/*.tsx" } })).toBe(true);
+  });
+
+  it("extracts partial tool calls without treating tool-call starts as complete", () => {
+    const update = {
+      type: "partial-tool-call",
+      toolCall: {
+        type: "glob",
+        args: { targeting: "src" }
+      }
+    };
+    const normalized = normalizeSDKToolCall(toolCallFromDelta(update));
+
+    expect(normalized).toEqual({
+      name: "glob",
+      arguments: { targeting: "src" }
+    });
+    expect(isForwardableSDKToolCall(normalized)).toBe(false);
+  });
+
+  it("requires both provider and tool names for SDK MCP forwarding", () => {
+    expect(isForwardableSDKToolCall({ name: "mcp", arguments: { providerIdentifier: "client" } })).toBe(false);
+    expect(isForwardableSDKToolCall({ name: "mcp", arguments: { providerIdentifier: "client", toolName: "glob" } })).toBe(true);
+  });
+
+  it("normalizes local client MCP forwarding tools back to SDK tool names", () => {
+    const normalized = normalizeSDKToolCall({
+      type: "mcp",
+      args: {
+        providerIdentifier: "client",
+        toolName: "client_shell",
+        args: {
+          command: "npm test",
+          timeout: 120000
+        }
+      }
+    });
+
+    expect(normalized).toEqual({
+      name: "shell",
+      arguments: {
+        command: "npm test",
+        timeout: 120000
+      }
+    });
+    expect(isForwardableSDKToolCall(normalized)).toBe(true);
+  });
+
+  it("tells the SDK to use client MCP tools instead of built-in local tools", () => {
+    const prompt = bridgePrompt("USER: create a file");
+
+    expect(prompt).toContain("client_shell");
+    expect(prompt).toContain("Do not use the SDK built-in shell");
+  });
+});

@@ -18,21 +18,37 @@ const bridgeToken = process.env.CURSOR_SDK_BRIDGE_TOKEN || "";
 const maxJsonBytes = parseInteger(process.env.CURSOR_SDK_BRIDGE_MAX_JSON_BYTES, 1024 * 1024);
 const maxAgents = parseInteger(process.env.CURSOR_SDK_BRIDGE_MAX_AGENTS, 128);
 const defaultCwd = process.env.CURSOR_SDK_WORKING_DIRECTORY || process.cwd();
+const clientMcpServerName = "client";
 
 const agentCache = new Map();
+let server = null;
 
-const server = http.createServer((request, response) => {
-  handleRequest(request, response).catch((error) => {
-    writeJson(response, openAiError(error), statusFromError(error));
+if (isMainModule()) {
+  startServer();
+  process.on("SIGINT", () => closeAndExit(0));
+  process.on("SIGTERM", () => closeAndExit(0));
+}
+
+export {
+  bridgePrompt,
+  isForwardableSDKToolCall,
+  normalizeSDKToolCall,
+  startServer,
+  toolCallFromDelta
+};
+
+function startServer() {
+  if (server) return server;
+  server = http.createServer((request, response) => {
+    handleRequest(request, response).catch((error) => {
+      writeJson(response, openAiError(error), statusFromError(error));
+    });
   });
-});
-
-server.listen(port, host, () => {
-  console.log(`Cursor SDK local-agent bridge listening on http://${host}:${port}/sdk`);
-});
-
-process.on("SIGINT", () => closeAndExit(0));
-process.on("SIGTERM", () => closeAndExit(0));
+  server.listen(port, host, () => {
+    console.log(`Cursor SDK local-agent bridge listening on http://${host}:${port}/sdk`);
+  });
+  return server;
+}
 
 async function handleRequest(request, response) {
   const url = new URL(request.url || "/", `http://${request.headers.host || `${host}:${port}`}`);
@@ -159,6 +175,7 @@ async function getAgent(input) {
     apiKey: input.apiKey,
     model: { id: input.model },
     name: "API for Cursor local bridge",
+    mcpServers: clientForwardingMcpServers(),
     local: {
       cwd: input.workingDirectory,
       sandboxOptions: { enabled: false },
@@ -170,14 +187,212 @@ async function getAgent(input) {
   return agent;
 }
 
+function clientForwardingMcpServers() {
+  return {
+    [clientMcpServerName]: {
+      type: "stdio",
+      command: process.execPath,
+      args: ["-e", clientForwardingMcpServerSource()]
+    }
+  };
+}
+
+function clientForwardingMcpServerSource() {
+  const tools = JSON.stringify(clientMcpToolDefinitions());
+  return `
+const readline = require("node:readline");
+const tools = ${tools};
+const rl = readline.createInterface({ input: process.stdin });
+function send(id, result) {
+  if (id === undefined || id === null) return;
+  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\\n");
+}
+function sendError(id, message) {
+  if (id === undefined || id === null) return;
+  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32000, message } }) + "\\n");
+}
+rl.on("line", (line) => {
+  if (!line.trim()) return;
+  let message;
+  try {
+    message = JSON.parse(line);
+  } catch {
+    return;
+  }
+  if (!message.id && String(message.method || "").startsWith("notifications/")) return;
+  if (message.method === "initialize") {
+    send(message.id, {
+      protocolVersion: "2024-11-05",
+      capabilities: { tools: {} },
+      serverInfo: { name: "api-for-cursor-client-tools", version: "0.1.0" }
+    });
+  } else if (message.method === "tools/list") {
+    send(message.id, { tools });
+  } else if (message.method === "tools/call") {
+    send(message.id, {
+      content: [{ type: "text", text: "FORWARDED_TO_OUTER_CLIENT" }],
+      isError: false
+    });
+  } else {
+    sendError(message.id, "Unsupported MCP method: " + message.method);
+  }
+});
+`;
+}
+
+function clientMcpToolDefinitions() {
+  const pathProperty = { type: "string", description: "File or directory path for the outer client." };
+  return [
+    {
+      name: "client_shell",
+      description: "Forward a shell command to the outer client. The bridge never executes it locally.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          command: { type: "string" },
+          workingDirectory: { type: "string" },
+          timeout: { type: "number" }
+        },
+        required: ["command"],
+        additionalProperties: true
+      }
+    },
+    {
+      name: "client_write",
+      description: "Forward a file write to the outer client.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: pathProperty,
+          fileText: { type: "string" }
+        },
+        required: ["path", "fileText"],
+        additionalProperties: true
+      }
+    },
+    {
+      name: "client_read",
+      description: "Forward a file read to the outer client.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: pathProperty,
+          offset: { type: "number" },
+          limit: { type: "number" }
+        },
+        required: ["path"],
+        additionalProperties: true
+      }
+    },
+    {
+      name: "client_edit",
+      description: "Forward a text replacement edit to the outer client.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: pathProperty,
+          oldString: { type: "string" },
+          newString: { type: "string" }
+        },
+        required: ["path", "oldString", "newString"],
+        additionalProperties: true
+      }
+    },
+    {
+      name: "client_delete",
+      description: "Forward a file or directory delete to the outer client.",
+      inputSchema: {
+        type: "object",
+        properties: { path: pathProperty },
+        required: ["path"],
+        additionalProperties: true
+      }
+    },
+    {
+      name: "client_glob",
+      description: "Forward a glob file search to the outer client.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          targetDirectory: { type: "string" },
+          globPattern: { type: "string" }
+        },
+        required: ["globPattern"],
+        additionalProperties: true
+      }
+    },
+    {
+      name: "client_grep",
+      description: "Forward a text search to the outer client.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          pattern: { type: "string" },
+          path: { type: "string" },
+          glob: { type: "string" }
+        },
+        required: ["pattern"],
+        additionalProperties: true
+      }
+    },
+    {
+      name: "client_ls",
+      description: "Forward a directory listing to the outer client.",
+      inputSchema: {
+        type: "object",
+        properties: { path: { type: "string" } },
+        additionalProperties: true
+      }
+    },
+    {
+      name: "client_read_lints",
+      description: "Forward diagnostics/lint reads to the outer client.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          paths: { type: "array", items: { type: "string" } }
+        },
+        required: ["paths"],
+        additionalProperties: true
+      }
+    },
+    {
+      name: "client_sem_search",
+      description: "Forward semantic code search to the outer client.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          query: { type: "string" },
+          targetDirectories: { type: "array", items: { type: "string" } }
+        },
+        required: ["query"],
+        additionalProperties: true
+      }
+    },
+    {
+      name: "client_todo_write",
+      description: "Forward todo list updates to the outer client.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          todos: { type: "array", items: { type: "object", additionalProperties: true } }
+        },
+        required: ["todos"],
+        additionalProperties: true
+      }
+    }
+  ];
+}
+
 function bridgePrompt(prompt) {
   return [
     "You are running through the real Cursor SDK local runtime behind an OpenAI-compatible client.",
     "The outer client owns local tool execution. When local work is needed, emit exactly one SDK tool call, then stop.",
-    "For file creation, file edits, deletes, package installs, tests, builds, and project scaffolds, use SDK shell with a complete command. Do not use SDK edit/write for mutations because hidden edit patches cannot be forwarded to the outer client.",
-    "When using SDK shell for file writes, include mkdir -p for parent directories and quoted heredocs or a small script with the full intended content.",
+    "A local MCP server named client exposes forwarding tools: client_shell, client_write, client_read, client_edit, client_delete, client_glob, client_grep, client_ls, client_read_lints, client_sem_search, and client_todo_write.",
+    "Use those client MCP forwarding tools for every local operation. Do not use the SDK built-in shell, write, edit, read, glob, grep, ls, delete, readLints, semSearch, or todowrite tools because those execute inside the bridge instead of the outer client.",
+    "For file creation, file edits, deletes, package installs, tests, builds, and project scaffolds, use client_shell with a complete command. Include mkdir -p for parent directories and quoted heredocs or a small script with the full intended content.",
     "When creating Vite 8 React projects, use @vitejs/plugin-react ^5 with vite ^8, or omit the plugin if it is not needed. Do not pair Vite 8 with @vitejs/plugin-react 4.",
-    "For inspection-only work, SDK read, grep, glob, and ls are acceptable. Do not claim local work is done until a tool result is present in the transcript.",
+    "For inspection-only work, use client_read, client_grep, client_glob, or client_ls. Do not claim local work is done until a tool result is present in the transcript.",
     "",
     prompt
   ].join("\n");
@@ -195,10 +410,73 @@ function normalizeSDKToolCall(toolCall) {
   const name = typeof toolCall.type === "string" ? toolCall.type : typeof toolCall.name === "string" ? toolCall.name : "";
   if (!name) return null;
   const args = toolCall.args && typeof toolCall.args === "object" && !Array.isArray(toolCall.args) ? toolCall.args : {};
+  const clientMcpTool = normalizeClientMcpToolCall(name, args);
+  if (clientMcpTool) return clientMcpTool;
   return {
     name,
     arguments: normalizeArguments(args)
   };
+}
+
+function normalizeClientMcpToolCall(name, args) {
+  if (canonicalToolName(name) !== "mcp") return null;
+  const provider = firstString(args, "providerIdentifier", "provider", "server", "serverName", "server_name");
+  if (provider && provider !== clientMcpServerName) return null;
+  const toolName = firstString(args, "toolName", "tool_name", "tool", "name");
+  const sdkName = sdkToolNameFromClientMcpTool(toolName);
+  if (!sdkName) return null;
+  const payload = args.args && typeof args.args === "object" && !Array.isArray(args.args) ? args.args : {};
+  return {
+    name: sdkName,
+    arguments: normalizeArguments(payload)
+  };
+}
+
+function sdkToolNameFromClientMcpTool(toolName) {
+  const normalized = normalizeToolName(toolName).replace(/^client/, "");
+  switch (normalized) {
+    case "shell":
+    case "bash":
+    case "run":
+    case "runcommand":
+      return "shell";
+    case "write":
+    case "writefile":
+      return "write";
+    case "read":
+    case "readfile":
+      return "read";
+    case "edit":
+    case "editfile":
+      return "edit";
+    case "delete":
+    case "deletefile":
+    case "remove":
+    case "removefile":
+      return "delete";
+    case "glob":
+    case "fileglob":
+      return "glob";
+    case "grep":
+    case "search":
+      return "grep";
+    case "ls":
+    case "list":
+    case "listfiles":
+      return "ls";
+    case "readlints":
+    case "diagnostics":
+      return "readLints";
+    case "semsearch":
+    case "semanticsearch":
+      return "semSearch";
+    case "todowrite":
+    case "todos":
+    case "updatetodos":
+      return "todowrite";
+    default:
+      return null;
+  }
 }
 
 function isForwardableSDKToolCall(toolCall) {
@@ -219,7 +497,8 @@ function isForwardableSDKToolCall(toolCall) {
     case "read":
       return hasString(args, "path", "filePath", "targetFile");
     case "glob":
-      return hasString(args, "globPattern", "glob_pattern", "pattern", "targetDirectory", "target_directory");
+      return hasString(args, "globPattern", "glob_pattern", "pattern", "fileGlob", "file_glob", "includePattern", "include_pattern", "glob")
+        || hasGlobString(args, "targetDirectory", "target_directory", "targeting", "path", "directory", "dir", "root", "basePath", "base_path");
     case "grep":
       return hasString(args, "pattern", "query");
     case "ls":
@@ -240,12 +519,27 @@ function canonicalToolName(name) {
   return String(name || "").replace(/[^A-Za-z0-9]/g, "").toLowerCase();
 }
 
+function normalizeToolName(name) {
+  return canonicalToolName(name);
+}
+
 function hasString(args, ...keys) {
   return keys.some((key) => typeof args[key] === "string" && args[key].trim().length > 0);
 }
 
+function firstString(args, ...keys) {
+  for (const key of keys) {
+    if (typeof args[key] === "string" && args[key].trim()) return args[key].trim();
+  }
+  return "";
+}
+
 function hasStringAllowEmpty(args, ...keys) {
   return keys.some((key) => typeof args[key] === "string");
+}
+
+function hasGlobString(args, ...keys) {
+  return keys.some((key) => typeof args[key] === "string" && /[*?[\]{}]/.test(args[key]));
 }
 
 function normalizeArguments(args) {
@@ -391,6 +685,10 @@ async function closeAndExit(code) {
       entry.agent.close();
     } catch {}
   }
-  server.close(() => process.exit(code));
+  server?.close(() => process.exit(code));
   setTimeout(() => process.exit(code), 500).unref();
+}
+
+function isMainModule() {
+  return process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 }

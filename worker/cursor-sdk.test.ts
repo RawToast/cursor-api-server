@@ -10,11 +10,11 @@ describe("Cursor SDK harness", () => {
     expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "write", arguments: { path: "package.json" } })).toBe(false);
     expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "shell", arguments: {} })).toBe(false);
     expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "mcp", arguments: { providerIdentifier: "filesystem" } })).toBe(false);
+    expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "glob", arguments: { targetDirectory: "src" } })).toBe(false);
   });
 
   it("allows SDK tool calls once required execution arguments are available", () => {
     expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "glob", arguments: { globPattern: "**/*.tsx" } })).toBe(true);
-    expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "glob", arguments: { targetDirectory: "src" } })).toBe(true);
     expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "glob", arguments: { targetDirectory: "src/**/*.tsx" } })).toBe(true);
     expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "write", arguments: { path: "package.json", fileText: "" } })).toBe(true);
     expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "write", arguments: { filePath: "empty.txt", content: "" } })).toBe(true);
