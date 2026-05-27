@@ -1580,7 +1580,7 @@ function openCodeArgsToSdkArgs(toolName: string, args: Record<string, unknown>, 
     };
   }
   if (canonical === "shell") {
-    const timeout = firstNumberNamedArg(args, "timeout", "timeoutMs", "timeout_ms", "timeoutSeconds", "timeout_seconds");
+    const timeout = firstNumberNamedArg(args, ...timeoutCandidates());
     return compactRecord({
       command: firstStringArg(args, ...shellCommandCandidates()),
       workingDirectory: firstStringArg(args, ...shellWorkdirCandidates()),
@@ -1761,7 +1761,7 @@ function sdkTimeoutArgument(argument: { key: string; value: number } | undefined
   if (["timeoutseconds", "seconds"].includes(source)) return argument.value * 1000;
   const schema = toolParameterSchema(tool);
   const normalizedProperties = new Map(schema.properties.map((property) => [normalizeToolName(property), property]));
-  const target = firstMatchingProperty(["timeout", "timeoutMs", "timeout_ms", "timeoutSeconds", "timeout_seconds"], schema.properties, normalizedProperties) || argument.key;
+  const target = firstMatchingProperty(timeoutCandidates(), schema.properties, normalizedProperties) || argument.key;
   return toolPropertyPrefersSecondsTimeout(tool, target) ? argument.value * 1000 : argument.value;
 }
 
@@ -1903,12 +1903,13 @@ function resolveToolSpec(emittedName: string, args: Record<string, unknown>, too
   const normalized = normalizeToolName(emittedName);
   const match = tools.find((tool) => normalizeToolName(tool.name) === normalized);
   if (match && nameMatchedToolCanAccept(emittedName, match)) return match;
+  if (canonicalToolName(emittedName) === "mcp") {
+    const specific = resolveSpecificMCPTool(args, tools);
+    if (specific) return specific;
+  }
   const candidates = toolNameAliases(normalized);
   const alias = tools.find((tool) => candidates.includes(normalizeToolName(tool.name)) && schemaLooksCompatible(emittedName, tool));
   if (alias) return alias;
-  if (canonicalToolName(emittedName) === "mcp") {
-    return resolveSpecificMCPTool(args, tools);
-  }
   if (canonicalToolName(emittedName) === "ls") {
     const glob = tools.find((tool) => schemaLooksCompatible("glob", tool));
     if (glob) return glob;
@@ -1972,7 +1973,7 @@ function normalizeToolArguments(
     return normalizeMCPWrapperArguments(args, schema);
   }
   const argsToNormalize = emittedCanonical === "mcp"
-    ? expandToolArguments(recordArgumentValue(args.args) ?? {})
+    ? expandToolArguments(mcpPayloadArguments(args))
     : expandToolArguments(args);
   if (!schema.properties.length) return argsToNormalize;
   const wrapperObjectArguments = normalizeWrapperObjectArguments(argsToNormalize, tool, emittedName, schema, wrapperDepth, context);
@@ -2099,8 +2100,8 @@ function shellFallbackArguments(
   const workdir = firstArg(args, shellExplicitWorkdirCandidates());
   const workdirKey = firstMatchingProperty(shellExplicitWorkdirCandidates(), schema.properties, normalizedProperties);
   if (workdirKey && shouldIncludeOptionalPath(workdir)) output[workdirKey] = workdir;
-  const timeout = firstArg(args, ["timeout", "timeoutMs", "timeout_ms", "timeoutSeconds", "timeout_seconds"]);
-  const timeoutKey = firstMatchingProperty(["timeout", "timeoutMs", "timeout_ms", "timeoutSeconds", "timeout_seconds"], schema.properties, normalizedProperties);
+  const timeout = firstArg(args, timeoutCandidates());
+  const timeoutKey = firstMatchingProperty(timeoutCandidates(), schema.properties, normalizedProperties);
   if (timeoutKey && timeout !== undefined) output[timeoutKey] = normalizeToolArgumentValue(timeout, timeoutKey, tool);
   const descriptionKey = firstMatchingProperty(["description"], schema.properties, normalizedProperties);
   if (descriptionKey) output[descriptionKey] = shellDescription(command);
@@ -2247,11 +2248,30 @@ function shellCommandCandidates(): string[] {
 }
 
 function shellWorkdirCandidates(): string[] {
-  return ["workingDirectory", "working_directory", "workdir", "cwd", "directory", "dir", "path", "root", "rootDir", "root_dir"];
+  return [
+    "workingDirectory",
+    "working_directory",
+    "workingDir",
+    "working_dir",
+    "workdir",
+    "cwd",
+    "directory",
+    "dir",
+    "path",
+    "root",
+    "rootDir",
+    "root_dir",
+    "projectRoot",
+    "project_root"
+  ];
 }
 
 function shellExplicitWorkdirCandidates(): string[] {
   return shellWorkdirCandidates().filter((candidate) => normalizeToolName(candidate) !== "path");
+}
+
+function timeoutCandidates(): string[] {
+  return ["timeout", "timeoutMs", "timeout_ms", "timeoutMilliseconds", "timeout_milliseconds", "timeoutSeconds", "timeout_seconds", "seconds"];
 }
 
 function firstArg(args: Record<string, unknown>, keys: string[]): unknown {
@@ -2548,14 +2568,12 @@ function operationValue(tool: OpenAiToolSpec | undefined, property: string, cano
 
 function stringEnumValues(tool: OpenAiToolSpec | undefined, property: string): string[] {
   const propertySchema = toolPropertySchema(tool, property);
-  if (!isRecord(propertySchema) || !Array.isArray(propertySchema.enum)) return [];
-  return propertySchema.enum.filter((item): item is string => typeof item === "string");
+  if (!isRecord(propertySchema)) return [];
+  return unionStringArrays(propertySchema.enum, propertySchema.const === undefined ? undefined : [propertySchema.const]);
 }
 
 function toolPropertySchema(tool: OpenAiToolSpec | undefined, property: string): unknown {
-  const parameters = isRecord(tool?.parameters) ? tool.parameters : undefined;
-  const properties = isRecord(parameters?.properties) ? parameters.properties : undefined;
-  return properties?.[property];
+  return toolParameterSchema(tool).propertySchemas[property];
 }
 
 function normalizeToolArgumentValue(
@@ -2779,11 +2797,19 @@ function normalizeMCPWrapperArguments(
   const argsKey = firstMatchingProperty(["arguments", "args", "input", "params", "parameters"], schema.properties, normalizedProperties);
   const serverName = firstStringArg(args, "providerIdentifier", "provider_identifier", "provider", "server", "serverName", "server_name");
   const toolName = firstStringArg(args, "toolName", "tool_name", "tool", "name");
-  const payload = recordArgumentValue(args.args) ?? {};
+  const payload = mcpPayloadArguments(args);
   if (serverKey && serverName) output[serverKey] = serverName;
   if (toolKey && toolName) output[toolKey] = toolName;
   if (argsKey) output[argsKey] = payload;
   return Object.keys(output).length ? output : args;
+}
+
+function mcpPayloadArguments(args: Record<string, unknown>): Record<string, unknown> {
+  return recordArgumentValue(firstArg(args, mcpPayloadCandidates())) ?? {};
+}
+
+function mcpPayloadCandidates(): string[] {
+  return ["args", "arguments", "input", "params", "parameters", "payload", "data"];
 }
 
 function normalizeWrapperObjectArguments(
@@ -2832,16 +2858,160 @@ function toolParameterSchema(tool: OpenAiToolSpec | undefined): ToolParameterSch
   return toolParameterSchemaFromValue(tool?.parameters);
 }
 
-function toolParameterSchemaFromValue(value: unknown): ToolParameterSchemaShape {
-  const parameters = isRecord(value) ? value : undefined;
-  const properties = isRecord(parameters?.properties) ? parameters.properties : undefined;
-  const required = Array.isArray(parameters?.required) ? parameters.required.filter((item): item is string => typeof item === "string") : [];
+function toolParameterSchemaFromValue(value: unknown, depth = 0, root: unknown = value, seenRefs: Set<string> = new Set()): ToolParameterSchemaShape {
+  if (depth > 5) return emptyToolParameterSchema();
+  const parameters = canonicalToolSchemaRecord(value, root, depth, seenRefs);
+  if (!parameters) return emptyToolParameterSchema();
+
+  const direct = directToolParameterSchema(parameters, root, depth, seenRefs);
+  const allOf = composedToolSchemas(parameters.allOf)
+    .map((schema) => toolParameterSchemaFromValue(schema, depth + 1, root, seenRefs));
+  const variants = [
+    ...composedToolSchemas(parameters.anyOf),
+    ...composedToolSchemas(parameters.oneOf)
+  ].map((schema) => toolParameterSchemaFromValue(schema, depth + 1, root, seenRefs));
+
+  return mergeToolParameterSchemas(
+    [
+      direct,
+      mergeToolParameterSchemas(allOf, "union"),
+      mergeToolParameterSchemas(variants, "intersection")
+    ],
+    "union"
+  );
+}
+
+function emptyToolParameterSchema(): ToolParameterSchemaShape {
+  return {
+    properties: [],
+    required: [],
+    allowAdditionalProperties: false,
+    propertySchemas: {}
+  };
+}
+
+function canonicalToolSchemaRecord(value: unknown, root: unknown, depth = 0, seenRefs: Set<string> = new Set()): Record<string, unknown> | undefined {
+  if (depth > 5) return undefined;
+  const dereferenced = dereferenceToolSchema(value, root, depth, seenRefs);
+  if (!isRecord(dereferenced)) return undefined;
+  if (!isRecord(dereferenced.properties)) {
+    if (isRecord(dereferenced.schema)) return canonicalToolSchemaRecord(dereferenced.schema, root, depth + 1, seenRefs);
+    if (isRecord(dereferenced.json_schema)) return canonicalToolSchemaRecord(dereferenced.json_schema, root, depth + 1, seenRefs);
+  }
+  return dereferenced;
+}
+
+function directToolParameterSchema(parameters: Record<string, unknown>, root: unknown, depth: number, seenRefs: Set<string>): ToolParameterSchemaShape {
+  const properties = isRecord(parameters.properties) ? parameters.properties : undefined;
+  const required = Array.isArray(parameters.required) ? parameters.required.filter((item): item is string => typeof item === "string") : [];
+  const propertySchemas = properties
+    ? Object.fromEntries(Object.entries(properties).map(([key, schema]) => [key, dereferenceToolSchema(schema, root, depth + 1, seenRefs)]))
+    : {};
   return {
     properties: properties ? Object.keys(properties) : [],
     required,
-    allowAdditionalProperties: parameters?.additionalProperties === true || isRecord(parameters?.additionalProperties),
-    propertySchemas: properties ?? {}
+    allowAdditionalProperties: parameters.additionalProperties === true || isRecord(parameters.additionalProperties),
+    propertySchemas
   };
+}
+
+function composedToolSchemas(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function dereferenceToolSchema(value: unknown, root: unknown, depth = 0, seenRefs: Set<string> = new Set()): unknown {
+  if (depth > 5 || !isRecord(value) || typeof value.$ref !== "string") return value;
+  const ref = value.$ref.trim();
+  if (!ref || seenRefs.has(ref)) return value;
+  const target = localSchemaReference(root, ref);
+  if (target === undefined || target === value) return value;
+  return dereferenceToolSchema(target, root, depth + 1, new Set([...seenRefs, ref]));
+}
+
+function localSchemaReference(root: unknown, ref: string): unknown {
+  if (!ref.startsWith("#")) return undefined;
+  const direct = jsonPointerTarget(root, ref);
+  if (direct !== undefined) return direct;
+  if (!isRecord(root)) return undefined;
+  return jsonPointerTarget(root.schema, ref) ?? jsonPointerTarget(root.json_schema, ref);
+}
+
+function jsonPointerTarget(root: unknown, ref: string): unknown {
+  if (!ref.startsWith("#")) return undefined;
+  if (ref === "#") return root;
+  if (!ref.startsWith("#/")) return undefined;
+  let current: unknown = root;
+  for (const token of ref.slice(2).split("/").map(jsonPointerToken)) {
+    if (Array.isArray(current)) {
+      const index = Number(token);
+      current = Number.isInteger(index) ? current[index] : undefined;
+    } else if (isRecord(current)) {
+      current = current[token];
+    } else {
+      return undefined;
+    }
+    if (current === undefined) return undefined;
+  }
+  return current;
+}
+
+function jsonPointerToken(value: string): string {
+  return value.replace(/~1/g, "/").replace(/~0/g, "~");
+}
+
+function mergeToolParameterSchemas(shapes: ToolParameterSchemaShape[], requiredMode: "union" | "intersection"): ToolParameterSchemaShape {
+  const useful = shapes.filter((shape) => shape.properties.length || shape.required.length || shape.allowAdditionalProperties);
+  if (!useful.length) return emptyToolParameterSchema();
+  const propertySchemas: Record<string, unknown> = {};
+  const properties: string[] = [];
+  for (const shape of useful) {
+    for (const property of shape.properties) {
+      if (!properties.includes(property)) properties.push(property);
+      propertySchemas[property] = propertySchemas[property] === undefined
+        ? shape.propertySchemas[property]
+        : mergePropertySchemas(propertySchemas[property], shape.propertySchemas[property]);
+    }
+  }
+  const required = requiredMode === "intersection"
+    ? intersectRequiredProperties(useful.map((shape) => shape.required))
+    : Array.from(new Set(useful.flatMap((shape) => shape.required)));
+  return {
+    properties,
+    required,
+    allowAdditionalProperties: useful.some((shape) => shape.allowAdditionalProperties),
+    propertySchemas
+  };
+}
+
+function mergePropertySchemas(left: unknown, right: unknown): unknown {
+  if (!isRecord(left) || !isRecord(right)) return left ?? right;
+  const merged: Record<string, unknown> = { ...right, ...left };
+  const enumValues = unionStringArrays(
+    left.enum,
+    right.enum,
+    left.const === undefined ? undefined : [left.const],
+    right.const === undefined ? undefined : [right.const]
+  );
+  if (enumValues.length) merged.enum = enumValues;
+  if (merged.description === undefined && typeof right.description === "string") merged.description = right.description;
+  return merged;
+}
+
+function unionStringArrays(...values: unknown[]): string[] {
+  const output: string[] = [];
+  for (const value of values) {
+    if (!Array.isArray(value)) continue;
+    for (const item of value) {
+      if (typeof item === "string" && !output.includes(item)) output.push(item);
+    }
+  }
+  return output;
+}
+
+function intersectRequiredProperties(requiredSets: string[][]): string[] {
+  const nonEmpty = requiredSets.filter((required) => required.length > 0);
+  if (!nonEmpty.length) return [];
+  return nonEmpty[0].filter((property) => nonEmpty.every((required) => required.includes(property)));
 }
 
 function applyRequiredToolDefaults(
@@ -2860,7 +3030,7 @@ function applyRequiredToolDefaults(
     if (workdirKey && required.includes(workdirKey) && !shouldIncludeOptionalPath(next[workdirKey])) {
       next[workdirKey] = ".";
     }
-    const timeoutKey = firstMatchingProperty(["timeout", "timeoutMs", "timeout_ms", "timeoutSeconds", "timeout_seconds"], schema.properties, normalizedProperties);
+    const timeoutKey = firstMatchingProperty(timeoutCandidates(), schema.properties, normalizedProperties);
     if (timeoutKey && required.includes(timeoutKey) && next[timeoutKey] === undefined) {
       next[timeoutKey] = normalizeToolArgumentValue(120_000, timeoutKey, tool);
     }
@@ -2893,8 +3063,14 @@ function sanitizeNormalizedToolArguments(
 ): Record<string, unknown> {
   if (!isShellLikeTool(tool, originalArgs)) return output;
   const next = { ...output };
-  const required = new Set(toolParameterSchema(tool).required);
-  for (const key of ["workdir", "cwd", "directory", "path"]) {
+  const schema = toolParameterSchema(tool);
+  const required = new Set(schema.required);
+  const normalizedProperties = new Map(schema.properties.map((property) => [normalizeToolName(property), property]));
+  const seen = new Set<string>();
+  for (const candidate of shellExplicitWorkdirCandidates()) {
+    const key = firstMatchingProperty([candidate], schema.properties, normalizedProperties) ?? candidate;
+    if (seen.has(key)) continue;
+    seen.add(key);
     if (!isSyntheticSdkWorkingDirectory(next[key])) continue;
     if (required.has(key)) next[key] = ".";
     else delete next[key];
@@ -3080,9 +3256,14 @@ function commonArgumentAliases(normalized: string): Array<{ candidates: string[]
     targetpath: [{ candidates: pathCandidates(), priority: 90 }],
     targetfile: [{ candidates: pathCandidates(), priority: 90 }],
     targeting: [{ candidates: ["path", "directory", "cwd", "pattern", "filePath"], priority: 45 }],
+    timeout: [{ candidates: timeoutCandidates(), priority: 90 }],
+    timeoutms: [{ candidates: timeoutCandidates(), priority: 95 }],
+    timeoutmilliseconds: [{ candidates: timeoutCandidates(), priority: 95 }],
+    timeoutseconds: [{ candidates: timeoutCandidates(), priority: 95 }],
+    seconds: [{ candidates: timeoutCandidates(), priority: 80 }],
     url: [{ candidates: ["url", "uri", "href"], priority: 90 }]
   };
-  if (normalized === "workingdirectory") return [{ candidates: shellWorkdirCandidates(), priority: 90 }];
+  if (normalized === "workingdirectory" || normalized === "workingdir") return [{ candidates: shellWorkdirCandidates(), priority: 90 }];
   if (normalized === "cmd") return [{ candidates: shellCommandCandidates(), priority: 95 }];
   if (normalized === "path") return [{ candidates: ["filePath", "path", "directory", "cwd", "pattern"], priority: 75 }];
   if (normalized === "prompt") return [{ candidates: ["prompt", "description", "instructions", "query"], priority: 80 }];
@@ -3154,8 +3335,11 @@ function toolSpecificArgumentAliases(tool: string, normalized: string): Array<{ 
     if (["cmd", "commandline", "command", "script", "shellcommand", "code"].includes(normalized)) {
       return [{ candidates: shellCommandCandidates(), priority: 95 }];
     }
-    if (["workingdirectory", "cwd", "directory", "dir", "path", "workdir"].includes(normalized)) {
+    if (["workingdirectory", "workingdir", "cwd", "directory", "dir", "path", "workdir", "projectroot"].includes(normalized)) {
       return [{ candidates: shellWorkdirCandidates(), priority: 95 }];
+    }
+    if (["timeout", "timeoutms", "timeoutmilliseconds", "timeoutseconds", "seconds"].includes(normalized)) {
+      return [{ candidates: timeoutCandidates(), priority: 95 }];
     }
   }
   if (["webfetch", "fetch", "web"].includes(tool)) {

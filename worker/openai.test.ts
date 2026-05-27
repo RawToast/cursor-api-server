@@ -1614,6 +1614,161 @@ describe("OpenAI compatibility adapter", () => {
     ]);
   });
 
+  it("maps SDK calls through composed and wrapped JSON schemas", () => {
+    const prepared = prepareOpencodeSdkChatRequest(
+      {
+        model: "composer-2.5-sdk",
+        messages: [{ role: "user", content: "build the app" }],
+        tools: [
+          {
+            name: "run_command",
+            json_schema: {
+              schema: {
+                allOf: [
+                  {
+                    type: "object",
+                    properties: {
+                      shellCommand: { type: "string" }
+                    },
+                    required: ["shellCommand"]
+                  },
+                  {
+                    type: "object",
+                    properties: {
+                      workingDir: { type: "string" },
+                      timeoutSeconds: { type: "number", description: "Timeout in seconds" },
+                      description: { type: "string" }
+                    }
+                  }
+                ],
+                additionalProperties: false
+              }
+            }
+          },
+          {
+            name: "workspace_file",
+            input_schema: {
+              anyOf: [
+                {
+                  type: "object",
+                  properties: {
+                    action: { type: "string", const: "create" },
+                    target: { type: "string" },
+                    body: { type: "string" }
+                  },
+                  required: ["action", "target", "body"]
+                },
+                {
+                  type: "object",
+                  properties: {
+                    action: { type: "string", const: "replace" },
+                    target: { type: "string" },
+                    find: { type: "string" },
+                    replaceWith: { type: "string" }
+                  },
+                  required: ["action", "target", "find", "replaceWith"]
+                }
+              ],
+              additionalProperties: false
+            }
+          }
+        ]
+      },
+      { id: "composer-2.5-sdk" }
+    );
+
+    expect(prepared.prompt.text).toContain('"sdk":"shell","client":"run_command"');
+    expect(prepared.prompt.text).toContain('"sdk":"write","client":"workspace_file"');
+
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: prepared.tools,
+      toolCalls: [
+        { name: "shell", arguments: { command: "npm run build", workingDirectory: "/workspace", timeout: 120_000 } },
+        { name: "write", arguments: { path: "src/App.jsx", fileText: "export default function App() { return null }" } },
+        { name: "edit", arguments: { path: "src/App.jsx", oldString: "return null", newString: "return <main />" } }
+      ],
+      context: { workingDirectory: "/tmp/composed-app" }
+    });
+
+    expect(toolCalls.map((call) => call.function.name)).toEqual(["run_command", "workspace_file", "workspace_file"]);
+    expect(toolCalls.map((call) => JSON.parse(call.function.arguments))).toEqual([
+      {
+        shellCommand: "npm run build",
+        timeoutSeconds: 120
+      },
+      {
+        action: "create",
+        target: "src/App.jsx",
+        body: "export default function App() { return null }"
+      },
+      {
+        action: "replace",
+        target: "src/App.jsx",
+        find: "return null",
+        replaceWith: "return <main />"
+      }
+    ]);
+  });
+
+  it("maps SDK calls through local JSON schema references", () => {
+    const prepared = prepareOpencodeSdkChatRequest(
+      {
+        model: "composer-2.5-sdk",
+        messages: [{ role: "user", content: "write the referenced schema file" }],
+        tools: [
+          {
+            name: "workspace_file",
+            parameters: {
+              $ref: "#/$defs/FileInput",
+              $defs: {
+                FileInput: {
+                  type: "object",
+                  properties: {
+                    operation: { $ref: "#/$defs/FileOperation" },
+                    absolutePath: { type: "string", description: "absolute path to the file" },
+                    text: { type: "string" }
+                  },
+                  required: ["operation", "absolutePath", "text"],
+                  additionalProperties: false
+                },
+                FileOperation: {
+                  type: "string",
+                  enum: ["create", "replace", "read"]
+                }
+              }
+            }
+          }
+        ]
+      },
+      { id: "composer-2.5-sdk" }
+    );
+
+    expect(prepared.prompt.text).toContain('"sdk":"write","client":"workspace_file"');
+
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: prepared.tools,
+      context: { workingDirectory: "/tmp/ref-schema-app" },
+      toolCalls: [
+        {
+          name: "write",
+          arguments: {
+            path: "src/App.jsx",
+            fileText: "export default function App() { return <main>Ref</main> }"
+          }
+        }
+      ]
+    });
+
+    expect(toolCalls.map((call) => call.function.name)).toEqual(["workspace_file"]);
+    expect(JSON.parse(toolCalls[0].function.arguments)).toEqual({
+      operation: "create",
+      absolutePath: "/tmp/ref-schema-app/src/App.jsx",
+      text: "export default function App() { return <main>Ref</main> }"
+    });
+  });
+
   it("maps SDK calls to generic harness schemas by reusable tool shape", () => {
     const toolCalls = toOpenAiToolCalls({
       responseId: "chatcmpl_test",
@@ -1715,6 +1870,76 @@ describe("OpenAI compatibility adapter", () => {
       contents: "export default function App() { return null }",
       overwrite: true
     });
+  });
+
+  it("maps Cursor SDK MCP calls with alternate payload envelopes", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "probe_write_file",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              file_path: { type: "string" },
+              contents: { type: "string" },
+              overwrite: { type: "boolean" }
+            },
+            required: ["file_path", "contents"]
+          }
+        },
+        {
+          name: "call_mcp_tool",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              serverName: { type: "string" },
+              toolName: { type: "string" },
+              input: { type: "object" }
+            },
+            required: ["serverName", "toolName", "input"]
+          }
+        }
+      ],
+      toolCalls: [
+        {
+          name: "mcp",
+          arguments: {
+            serverName: "probe",
+            name: "write_file",
+            arguments: JSON.stringify({
+              file_path: "src/App.tsx",
+              contents: "export default function App() { return null }",
+              overwrite: true
+            })
+          }
+        },
+        {
+          name: "mcp",
+          arguments: {
+            provider: "filesystem",
+            tool: "read_file",
+            parameters: JSON.stringify({ path: "README.md" })
+          }
+        }
+      ]
+    });
+
+    expect(toolCalls.map((call) => call.function.name)).toEqual(["probe_write_file", "call_mcp_tool"]);
+    expect(toolCalls.map((call) => JSON.parse(call.function.arguments))).toEqual([
+      {
+        file_path: "src/App.tsx",
+        contents: "export default function App() { return null }",
+        overwrite: true
+      },
+      {
+        serverName: "filesystem",
+        toolName: "read_file",
+        input: { path: "README.md" }
+      }
+    ]);
   });
 
   it("maps Cursor SDK MCP calls to single-word client tools", () => {

@@ -1942,14 +1942,14 @@ public enum OpenAICompatibility {
             return caseInsensitive
         }
 
-        let aliases = Set(toolAliases(for: name).map(normalizedName))
-        if let aliased = tools.first(where: { aliases.contains(normalizedName($0.name)) && schemaLooksCompatible(sdkToolName: name, tool: $0) }) {
-            return aliased
-        }
-
         if canonicalToolName(name) == "mcp",
            let mcpTool = resolveSpecificMCPTool(arguments: arguments, tools: tools) {
             return mcpTool
+        }
+
+        let aliases = Set(toolAliases(for: name).map(normalizedName))
+        if let aliased = tools.first(where: { aliases.contains(normalizedName($0.name)) && schemaLooksCompatible(sdkToolName: name, tool: $0) }) {
+            return aliased
         }
 
         if canonicalToolName(name) == "ls",
@@ -2190,10 +2190,13 @@ public enum OpenAICompatibility {
         case "readlints":
             copy("paths", as: ["files", "filePaths", "file_paths"])
         case "mcp":
-            copy("name", as: ["tool", "toolName", "tool_name"])
-            copy("args", as: ["arguments", "input", "params", "parameters"])
-            copy("providerIdentifier", as: ["provider", "server", "serverName", "server_name"])
-            copy("toolName", as: ["tool", "name", "tool_name"])
+            copyFirst(["providerIdentifier", "provider_identifier", "provider", "server", "serverName", "server_name"], as: ["provider", "server", "serverName", "server_name"])
+            copyFirst(["toolName", "tool_name", "tool", "name"], as: ["tool", "name", "tool_name"])
+            if let payloadArgument = firstArgument(in: arguments, keys: mcpPayloadAliases()),
+               let payloadKey = propertyName(matching: mcpPayloadAliases(), in: properties) {
+                output[payloadKey] = .object(objectArgumentValue(payloadArgument.value) ?? [:])
+                consumed.insert(payloadArgument.key)
+            }
         case "semsearch":
             copy("query", as: ["pattern", "search"])
             copy("targetDirectories", as: ["target_directories", "directories", "paths"])
@@ -2295,12 +2298,15 @@ public enum OpenAICompatibility {
         properties: [String],
         required: Set<String>
     ) {
-        for key in ["workdir", "cwd", "directory", "path"] {
+        var seen = Set<String>()
+        for key in shellExplicitWorkdirAliases() {
             guard let property = propertyName(matching: [key], in: properties),
+                  !seen.contains(property),
                   let value = output[property],
                   isSyntheticSDKWorkingDirectory(value) else {
                 continue
             }
+            seen.insert(property)
             if isRequired(property, in: required) {
                 output[property] = .string(".")
             } else {
@@ -2323,9 +2329,9 @@ public enum OpenAICompatibility {
         let properties = parameterPropertyNames(tool)
         let allowAdditionalProperties = parameterAllowsAdditionalProperties(tool)
         guard !properties.isEmpty else {
-            return arguments["args"]?.objectValue ?? arguments
+            return mcpPayloadArguments(arguments)
         }
-        let payload = arguments["args"].flatMap(objectArgumentValue) ?? [:]
+        let payload = mcpPayloadArguments(arguments)
         var output: [String: JSONValue] = [:]
         for (key, value) in expandedToolArguments(payload) {
             if let target = propertyName(matching: [key], in: properties) {
@@ -2338,6 +2344,17 @@ public enum OpenAICompatibility {
             }
         }
         return output
+    }
+
+    private static func mcpPayloadArguments(_ arguments: [String: JSONValue]) -> [String: JSONValue] {
+        guard let value = firstArgument(in: arguments, keys: mcpPayloadAliases())?.value else {
+            return [:]
+        }
+        return objectArgumentValue(value) ?? [:]
+    }
+
+    private static func mcpPayloadAliases() -> [String] {
+        ["args", "arguments", "input", "params", "parameters", "payload", "data"]
     }
 
     private static func shellFallbackCommand(_ arguments: [String: JSONValue], sdkToolName: String) -> String? {
@@ -2962,19 +2979,255 @@ public enum OpenAICompatibility {
 
     private static func stringEnumValues(for property: String, tool: OpenAIToolSpec) -> [String] {
         guard let propertySchema = parameterPropertySchema(property, tool: tool),
-              case .object(let schema) = propertySchema,
-              case .array(let values)? = schema["enum"] else {
+              case .object(let schema) = propertySchema else {
             return []
         }
-        return values.compactMap(\.stringValue)
+        return unionStringEnumValues(schema["enum"], schema["const"])
     }
 
     private static func parameterPropertySchema(_ property: String, tool: OpenAIToolSpec) -> JSONValue? {
-        guard case .object(let root)? = tool.parameters,
-              case .object(let properties)? = root["properties"] else {
+        let shape = parameterSchemaShape(tool.parameters)
+        if let exact = shape.properties[property] {
+            return exact
+        }
+        let normalized = normalizedName(property)
+        return shape.properties.first(where: { normalizedName($0.key) == normalized })?.value
+    }
+
+    private struct ParameterSchemaShape {
+        var properties: [String: JSONValue]
+        var propertyOrder: [String]
+        var required: Set<String>
+        var allowsAdditionalProperties: Bool
+    }
+
+    private static func parameterSchemaShape(
+        _ value: JSONValue?,
+        depth: Int = 0,
+        root: JSONValue? = nil,
+        seenRefs: Set<String> = []
+    ) -> ParameterSchemaShape {
+        let schemaRoot = root ?? value
+        guard depth <= 5,
+              let object = canonicalParameterSchemaObject(value, root: schemaRoot, depth: depth, seenRefs: seenRefs) else {
+            return emptyParameterSchemaShape()
+        }
+
+        let direct = directParameterSchemaShape(object, root: schemaRoot, depth: depth, seenRefs: seenRefs)
+        let allOf = composedParameterSchemas(object["allOf"]).map {
+            parameterSchemaShape($0, depth: depth + 1, root: schemaRoot, seenRefs: seenRefs)
+        }
+        let variants = (composedParameterSchemas(object["anyOf"]) + composedParameterSchemas(object["oneOf"]))
+            .map { parameterSchemaShape($0, depth: depth + 1, root: schemaRoot, seenRefs: seenRefs) }
+
+        return mergeParameterSchemaShapes(
+            [
+                direct,
+                mergeParameterSchemaShapes(allOf, requiredMode: .union),
+                mergeParameterSchemaShapes(variants, requiredMode: .intersection)
+            ],
+            requiredMode: .union
+        )
+    }
+
+    private static func emptyParameterSchemaShape() -> ParameterSchemaShape {
+        ParameterSchemaShape(properties: [:], propertyOrder: [], required: [], allowsAdditionalProperties: false)
+    }
+
+    private static func canonicalParameterSchemaObject(
+        _ value: JSONValue?,
+        root: JSONValue?,
+        depth: Int,
+        seenRefs: Set<String>
+    ) -> [String: JSONValue]? {
+        guard depth <= 5,
+              let dereferenced = dereferencedParameterSchemaValue(value, root: root, depth: depth, seenRefs: seenRefs),
+              case .object(let object) = dereferenced else {
             return nil
         }
-        return properties[property]
+        if object["properties"] == nil {
+            if case .object? = object["schema"] {
+                return canonicalParameterSchemaObject(object["schema"], root: root, depth: depth + 1, seenRefs: seenRefs)
+            }
+            if case .object? = object["json_schema"] {
+                return canonicalParameterSchemaObject(object["json_schema"], root: root, depth: depth + 1, seenRefs: seenRefs)
+            }
+        }
+        return object
+    }
+
+    private static func directParameterSchemaShape(
+        _ root: [String: JSONValue],
+        root schemaRoot: JSONValue?,
+        depth: Int,
+        seenRefs: Set<String>
+    ) -> ParameterSchemaShape {
+        let properties: [String: JSONValue]
+        if case .object(let object)? = root["properties"] {
+            properties = object.mapValues {
+                dereferencedParameterSchemaValue($0, root: schemaRoot, depth: depth + 1, seenRefs: seenRefs) ?? $0
+            }
+        } else {
+            properties = [:]
+        }
+        let required: Set<String>
+        if case .array(let values)? = root["required"] {
+            required = Set(values.compactMap(\.stringValue).map(normalizedName))
+        } else {
+            required = []
+        }
+        let allowsAdditionalProperties: Bool
+        if case .bool(true)? = root["additionalProperties"] {
+            allowsAdditionalProperties = true
+        } else if case .object? = root["additionalProperties"] {
+            allowsAdditionalProperties = true
+        } else {
+            allowsAdditionalProperties = false
+        }
+        return ParameterSchemaShape(
+            properties: properties,
+            propertyOrder: Array(properties.keys),
+            required: required,
+            allowsAdditionalProperties: allowsAdditionalProperties
+        )
+    }
+
+    private static func composedParameterSchemas(_ value: JSONValue?) -> [JSONValue] {
+        guard case .array(let values)? = value else { return [] }
+        return values
+    }
+
+    private static func dereferencedParameterSchemaValue(
+        _ value: JSONValue?,
+        root: JSONValue?,
+        depth: Int,
+        seenRefs: Set<String>
+    ) -> JSONValue? {
+        guard depth <= 5,
+              case .object(let object)? = value,
+              let reference = object["$ref"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !reference.isEmpty,
+              !seenRefs.contains(reference),
+              let target = localSchemaReference(root: root, reference: reference) else {
+            return value
+        }
+        var nextSeenRefs = seenRefs
+        nextSeenRefs.insert(reference)
+        return dereferencedParameterSchemaValue(target, root: root, depth: depth + 1, seenRefs: nextSeenRefs) ?? target
+    }
+
+    private static func localSchemaReference(root: JSONValue?, reference: String) -> JSONValue? {
+        guard reference.hasPrefix("#") else { return nil }
+        if let direct = jsonPointerTarget(root: root, reference: reference) {
+            return direct
+        }
+        guard case .object(let object)? = root else { return nil }
+        return jsonPointerTarget(root: object["schema"], reference: reference)
+            ?? jsonPointerTarget(root: object["json_schema"], reference: reference)
+    }
+
+    private static func jsonPointerTarget(root: JSONValue?, reference: String) -> JSONValue? {
+        guard reference.hasPrefix("#") else { return nil }
+        if reference == "#" {
+            return root
+        }
+        guard reference.hasPrefix("#/") else { return nil }
+        var current = root
+        for token in reference.dropFirst(2).split(separator: "/", omittingEmptySubsequences: false).map({ jsonPointerToken(String($0)) }) {
+            guard let value = current else { return nil }
+            switch value {
+            case .object(let object):
+                current = object[token]
+            case .array(let array):
+                guard let index = Int(token), array.indices.contains(index) else { return nil }
+                current = array[index]
+            default:
+                return nil
+            }
+        }
+        return current
+    }
+
+    private static func jsonPointerToken(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "~1", with: "/")
+            .replacingOccurrences(of: "~0", with: "~")
+    }
+
+    private enum RequiredMergeMode {
+        case union
+        case intersection
+    }
+
+    private static func mergeParameterSchemaShapes(_ shapes: [ParameterSchemaShape], requiredMode: RequiredMergeMode) -> ParameterSchemaShape {
+        let useful = shapes.filter { !$0.propertyOrder.isEmpty || !$0.required.isEmpty || $0.allowsAdditionalProperties }
+        guard !useful.isEmpty else { return emptyParameterSchemaShape() }
+        var properties: [String: JSONValue] = [:]
+        var propertyOrder: [String] = []
+        for shape in useful {
+            for property in shape.propertyOrder {
+                if !propertyOrder.contains(property) {
+                    propertyOrder.append(property)
+                }
+                if let existing = properties[property], let next = shape.properties[property] {
+                    properties[property] = mergedPropertySchema(existing, next)
+                } else if properties[property] == nil {
+                    properties[property] = shape.properties[property]
+                }
+            }
+        }
+
+        let required: Set<String>
+        switch requiredMode {
+        case .union:
+            required = useful.reduce(into: Set<String>()) { output, shape in output.formUnion(shape.required) }
+        case .intersection:
+            let nonEmpty = useful.map(\.required).filter { !$0.isEmpty }
+            required = nonEmpty.dropFirst().reduce(nonEmpty.first ?? []) { current, next in current.intersection(next) }
+        }
+
+        return ParameterSchemaShape(
+            properties: properties,
+            propertyOrder: propertyOrder,
+            required: required,
+            allowsAdditionalProperties: useful.contains(where: \.allowsAdditionalProperties)
+        )
+    }
+
+    private static func mergedPropertySchema(_ left: JSONValue, _ right: JSONValue) -> JSONValue {
+        guard case .object(let leftObject) = left,
+              case .object(let rightObject) = right else {
+            return left
+        }
+        var merged = rightObject.merging(leftObject) { _, left in left }
+        let enumValues = unionStringEnumValues(leftObject["enum"], rightObject["enum"], leftObject["const"], rightObject["const"])
+        if !enumValues.isEmpty {
+            merged["enum"] = .array(enumValues.map(JSONValue.string))
+        }
+        if merged["description"] == nil, let description = rightObject["description"] {
+            merged["description"] = description
+        }
+        return .object(merged)
+    }
+
+    private static func unionStringEnumValues(_ values: JSONValue?...) -> [String] {
+        var output: [String] = []
+        for value in values {
+            let items: [JSONValue]
+            switch value {
+            case .array(let values):
+                items = values
+            case .some(let value):
+                items = [value]
+            case .none:
+                items = []
+            }
+            for item in items {
+                guard let string = item.stringValue, !output.contains(string) else { continue }
+                output.append(string)
+            }
+        }
+        return output
     }
 
     private struct WrapperObjectArgumentProperty {
@@ -3165,19 +3418,11 @@ public enum OpenAICompatibility {
     }
 
     private static func parameterPropertyNames(_ tool: OpenAIToolSpec) -> [String] {
-        guard case .object(let root)? = tool.parameters,
-              case .object(let properties)? = root["properties"] else {
-            return []
-        }
-        return Array(properties.keys)
+        parameterSchemaShape(tool.parameters).propertyOrder
     }
 
     private static func requiredParameterNames(_ tool: OpenAIToolSpec) -> Set<String> {
-        guard case .object(let root)? = tool.parameters,
-              case .array(let required)? = root["required"] else {
-            return []
-        }
-        return Set(required.compactMap(\.stringValue).map(normalizedName))
+        parameterSchemaShape(tool.parameters).required
     }
 
     private static func isRequired(_ property: String, in required: Set<String>) -> Bool {
@@ -3185,17 +3430,7 @@ public enum OpenAICompatibility {
     }
 
     private static func parameterAllowsAdditionalProperties(_ tool: OpenAIToolSpec) -> Bool {
-        guard case .object(let root)? = tool.parameters,
-              let additional = root["additionalProperties"] else {
-            return false
-        }
-        if case .bool(true) = additional {
-            return true
-        }
-        if case .object = additional {
-            return true
-        }
-        return false
+        parameterSchemaShape(tool.parameters).allowsAdditionalProperties
     }
 
     private static func propertyName(matching candidates: [String], in properties: [String]) -> String? {
@@ -3400,7 +3635,11 @@ public enum OpenAICompatibility {
     }
 
     private static func shellWorkdirAliases() -> [String] {
-        ["workingDirectory", "working_directory", "workdir", "cwd", "directory", "dir", "path", "root", "rootDir", "root_dir"]
+        [
+            "workingDirectory", "working_directory", "workingDir", "working_dir",
+            "workdir", "cwd", "directory", "dir", "path", "root", "rootDir", "root_dir",
+            "projectRoot", "project_root"
+        ]
     }
 
     private static func shellExplicitWorkdirAliases() -> [String] {
