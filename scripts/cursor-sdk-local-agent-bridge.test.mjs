@@ -12,8 +12,10 @@ import {
   isRetryableSDKRunError,
   normalizeModel,
   normalizeSDKToolCall,
+  openAiError,
   runExclusiveForAgent,
   sdkRunFailureSummary,
+  statusFromError,
   toolCallFromDelta,
   validateClientMcpToolCall
 } from "./cursor-sdk-local-agent-bridge.mjs";
@@ -44,6 +46,25 @@ describe("Cursor SDK local-agent bridge", () => {
       message: "Missing or invalid authorization",
       code: "unauthorized",
       retryable: false
+    });
+  });
+
+  it("surfaces Cursor SDK authentication failures as unauthorized API errors", () => {
+    const error = Object.assign(new Error("Error"), {
+      name: "AuthenticationError",
+      code: "internal",
+      status: "401",
+      endpoint: "GET /v1/models"
+    });
+
+    expect(statusFromError(error)).toBe(401);
+    expect(openAiError(error)).toEqual({
+      error: {
+        message: "Missing or invalid authorization",
+        type: "invalid_request_error",
+        code: "unauthorized",
+        status: 401
+      }
     });
   });
 

@@ -79,6 +79,25 @@ final class ConnectivityCheckTests: XCTestCase {
         XCTAssertEqual(error["code"] as? String, "keychain_locked")
         XCTAssertTrue((error["message"] as? String)?.contains("Unlock Key") == true)
     }
+
+    func testSDKHarnessMapsBridgeStreamAuthErrorsToUnauthorized() {
+        XCTAssertEqual(
+            LocalCursorSDKHarness.bridgeStreamError(from: [
+                "message": "Error",
+                "code": "unauthorized",
+                "status": 401
+            ]),
+            .unauthorized
+        )
+        XCTAssertEqual(
+            LocalCursorSDKHarness.bridgeStreamError(from: [
+                "message": "Error",
+                "code": "internal",
+                "status": "401"
+            ]),
+            .unauthorized
+        )
+    }
 }
 
 private actor ConnectivityRecorder {

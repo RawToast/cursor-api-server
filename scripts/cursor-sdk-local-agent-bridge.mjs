@@ -52,8 +52,10 @@ export {
   isRetryableSDKRunError,
   normalizeSDKToolCall,
   normalizeModel,
+  openAiError,
   runExclusiveForAgent,
   sdkRunFailureSummary,
+  statusFromError,
   startServer,
   validateClientMcpToolCall,
   toolCallFromDelta
@@ -2040,17 +2042,76 @@ function sleep(ms) {
 }
 
 function openAiError(error) {
+  const status = statusFromError(error);
+  const message = messageFromError(error, status);
+  const code = codeFromError(error, status);
   return {
     error: {
-      message: error instanceof Error ? error.message : String(error),
-      type: error?.type || "api_error",
-      code: error?.code || null
+      message,
+      type: error?.type || (status >= 500 ? "api_error" : "invalid_request_error"),
+      code,
+      status
     }
   };
 }
 
 function statusFromError(error) {
-  return Number.isInteger(error?.status) ? error.status : 500;
+  for (const value of flattenErrorValues(error)) {
+    const status = parseHTTPStatus(value?.status);
+    if (status) return status;
+  }
+  if (isAuthenticationSDKError(error)) return 401;
+  if (isRetryableSDKRunError(error)) return 503;
+  return 500;
+}
+
+function messageFromError(error, status) {
+  if (status === 401 && isAuthenticationSDKError(error)) {
+    return "Missing or invalid authorization";
+  }
+  const message = firstNonEmptyString(
+    error?.message,
+    error?.rawMessage,
+    error?.error,
+    error?.details
+  );
+  if (message && message !== "Error") return message;
+  if (status === 401) return "Missing or invalid authorization";
+  return message || "Cursor SDK request failed";
+}
+
+function codeFromError(error, status) {
+  if (status === 401 && isAuthenticationSDKError(error)) return "unauthorized";
+  const code = firstNonEmptyString(error?.code, error?.cause?.code);
+  if (code && !(status === 401 && code === "internal")) return code;
+  if (status === 401) return "unauthorized";
+  if (status === 503) return "cursor_sdk_unavailable";
+  return code || "cursor_sdk_error";
+}
+
+function isAuthenticationSDKError(error) {
+  return flattenErrorValues(error).some((value) => {
+    const name = String(value?.name || "").toLowerCase();
+    const code = String(value?.code || "").toLowerCase();
+    const message = String(value?.message || value?.rawMessage || "").toLowerCase();
+    const status = parseHTTPStatus(value?.status);
+    return status === 401
+      || name.includes("authentication")
+      || code === "unauthorized"
+      || code === "authentication_error"
+      || message.includes("missing or invalid authorization")
+      || message.includes("invalid authorization")
+      || message.includes("unauthorized");
+  });
+}
+
+function parseHTTPStatus(value) {
+  if (Number.isInteger(value) && value >= 100 && value <= 599) return value;
+  if (typeof value === "string" && /^\d{3}$/.test(value.trim())) {
+    const parsed = Number.parseInt(value, 10);
+    if (parsed >= 100 && parsed <= 599) return parsed;
+  }
+  return 0;
 }
 
 class HttpError extends Error {

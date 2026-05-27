@@ -375,11 +375,27 @@ public struct LocalCursorSDKHarness: CursorSDKHarness {
             finalOutput = output
         case "error":
             let error = object["error"] as? [String: Any]
-            let message = error?["message"] as? String ?? "Cursor SDK bridge stream failed."
-            throw CursorAPIError.upstream(message)
+            throw Self.bridgeStreamError(from: error)
         default:
             break
         }
+    }
+
+    static func bridgeStreamError(from error: [String: Any]?) -> CursorAPIError {
+        let status = intValue(error?["status"])
+        let code = (error?["code"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if status == 401 || code == "unauthorized" {
+            return .unauthorized
+        }
+        let message = (error?["message"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return .upstream((message?.isEmpty == false ? message : nil) ?? "Cursor SDK bridge stream failed.")
+    }
+
+    private static func intValue(_ value: Any?) -> Int? {
+        if let value = value as? Int { return value }
+        if let value = value as? NSNumber { return value.intValue }
+        if let value = value as? String { return Int(value.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        return nil
     }
 
     private func bridgeOutput(from value: Any?, agentID: String, runID: String) -> CursorSDKOutput? {
