@@ -3978,7 +3978,14 @@ public enum OpenAICompatibility {
     }
 
     private static func arrayConstraintsApply(_ schema: [String: JSONValue], value: JSONValue, types: [String]) -> Bool {
-        guard schema["items"] != nil || schema["prefixItems"] != nil || schema["minItems"] != nil || schema["maxItems"] != nil else {
+        guard schema["items"] != nil
+            || schema["prefixItems"] != nil
+            || schema["contains"] != nil
+            || schema["minItems"] != nil
+            || schema["maxItems"] != nil
+            || schema["minContains"] != nil
+            || schema["maxContains"] != nil
+            || schema["uniqueItems"] != nil else {
             return false
         }
         if jsonValue(value, matchesType: "array") {
@@ -3994,6 +4001,24 @@ public enum OpenAICompatibility {
         }
         if let maxItems = schema["maxItems"]?.integerValue, values.count > maxItems {
             return false
+        }
+        if schema["uniqueItems"] == .bool(true) {
+            for left in 0..<values.count {
+                for right in (left + 1)..<values.count where values[left] == values[right] {
+                    return false
+                }
+            }
+        }
+        if let containsSchema = schema["contains"] {
+            let itemSchema = schemaWithInheritedDefinitions(containsSchema, root: .object(schema))
+            let matches = values.filter { argumentValueSatisfiesSchema($0, schema: itemSchema, required: true) }.count
+            let minContains = schema["minContains"]?.integerValue ?? 1
+            if matches < minContains {
+                return false
+            }
+            if let maxContains = schema["maxContains"]?.integerValue, matches > maxContains {
+                return false
+            }
         }
         let prefixItems: [JSONValue]
         if case .array(let values)? = schema["prefixItems"] {

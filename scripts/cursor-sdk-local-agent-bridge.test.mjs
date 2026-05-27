@@ -413,6 +413,54 @@ describe("Cursor SDK local-agent bridge", () => {
     expect(validateClientMcpToolCall(tools, "constrained_search", { query: "todo_app", limit: 10 })).toBe(null);
   });
 
+  it("validates dynamic client MCP array membership constraints", () => {
+    const tools = clientMcpToolDefinitions([
+      {
+        name: "run_steps",
+        parameters: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            steps: {
+              type: "array",
+              items: { type: "string" },
+              uniqueItems: true,
+              contains: { const: "build" },
+              minContains: 1,
+              maxContains: 1
+            },
+            labels: {
+              type: "array",
+              items: { type: "string" },
+              contains: { type: "string", pattern: "^release:" },
+              minContains: 0,
+              maxContains: 1
+            }
+          },
+          required: ["steps"]
+        }
+      }
+    ]);
+
+    expect(validateClientMcpToolCall(tools, "run_steps", {
+      steps: ["install", "build", "test"],
+      labels: ["release:stable", "ui"]
+    })).toBe(null);
+    expect(validateClientMcpToolCall(tools, "run_steps", {
+      steps: ["build", "build"]
+    })).toBe("Invalid value for run_steps.steps: expected unique items");
+    expect(validateClientMcpToolCall(tools, "run_steps", {
+      steps: ["install", "test"]
+    })).toBe("Invalid value for run_steps.steps: expected at least 1 matching item");
+    expect(validateClientMcpToolCall(tools, "run_steps", {
+      steps: ["build", "package", "build"]
+    })).toBe("Invalid value for run_steps.steps: expected unique items");
+    expect(validateClientMcpToolCall(tools, "run_steps", {
+      steps: ["build"],
+      labels: ["release:stable", "release:beta"]
+    })).toBe("Invalid value for run_steps.labels: expected at most 1 matching item");
+  });
+
   it("validates dynamic client MCP pattern properties", () => {
     const tools = clientMcpToolDefinitions([
       {

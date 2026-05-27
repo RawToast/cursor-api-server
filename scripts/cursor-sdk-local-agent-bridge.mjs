@@ -491,7 +491,15 @@ function validateJsonSchemaValue(value, schema, path, rootSchema = schema, seenR
     }
   }
 
-  const arrayLike = schema.items || schema.prefixItems || schema.minItems !== undefined || schema.maxItems !== undefined || types.includes("array");
+  const arrayLike = schema.items
+    || schema.prefixItems
+    || schema.contains !== undefined
+    || schema.minItems !== undefined
+    || schema.maxItems !== undefined
+    || schema.minContains !== undefined
+    || schema.maxContains !== undefined
+    || schema.uniqueItems !== undefined
+    || types.includes("array");
   if (arrayLike) {
     if (!Array.isArray(value)) return `Invalid value for ${path}: expected array`;
     if (Number.isInteger(schema.minItems) && value.length < schema.minItems) {
@@ -499,6 +507,26 @@ function validateJsonSchemaValue(value, schema, path, rootSchema = schema, seenR
     }
     if (Number.isInteger(schema.maxItems) && value.length > schema.maxItems) {
       return `Invalid value for ${path}: expected at most ${schema.maxItems} item${schema.maxItems === 1 ? "" : "s"}`;
+    }
+    if (schema.uniqueItems === true) {
+      for (let left = 0; left < value.length; left += 1) {
+        for (let right = left + 1; right < value.length; right += 1) {
+          if (jsonValuesEqual(value[left], value[right])) {
+            return `Invalid value for ${path}: expected unique items`;
+          }
+        }
+      }
+    }
+    if (isRecord(schema.contains) || typeof schema.contains === "boolean") {
+      const matches = value.filter((item) => validateJsonSchemaValue(item, schema.contains, path, root, new Set(seenRefs)) === null).length;
+      const minContains = Number.isInteger(schema.minContains) ? schema.minContains : 1;
+      const maxContains = Number.isInteger(schema.maxContains) ? schema.maxContains : null;
+      if (matches < minContains) {
+        return `Invalid value for ${path}: expected at least ${minContains} matching item${minContains === 1 ? "" : "s"}`;
+      }
+      if (maxContains !== null && matches > maxContains) {
+        return `Invalid value for ${path}: expected at most ${maxContains} matching item${maxContains === 1 ? "" : "s"}`;
+      }
     }
     const prefixItems = Array.isArray(schema.prefixItems) ? schema.prefixItems : [];
     for (let index = 0; index < Math.min(prefixItems.length, value.length); index += 1) {
@@ -541,11 +569,14 @@ function schemaHasStructuralKeyword(schema) {
     "allOf",
     "anyOf",
     "const",
+    "contains",
     "definitions",
     "enum",
     "items",
+    "maxContains",
     "maxItems",
     "maxProperties",
+    "minContains",
     "minItems",
     "minProperties",
     "not",
@@ -557,7 +588,8 @@ function schemaHasStructuralKeyword(schema) {
     "required",
     "dependentRequired",
     "dependentSchemas",
-    "type"
+    "type",
+    "uniqueItems"
   ].some((key) => Object.prototype.hasOwnProperty.call(schema, key));
 }
 

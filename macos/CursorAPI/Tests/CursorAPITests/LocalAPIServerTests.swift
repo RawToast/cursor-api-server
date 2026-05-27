@@ -6723,6 +6723,70 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertEqual((message["tool_calls"] as? [[String: Any]])?.count, 0)
     }
 
+    func testChatToolCallsAllowSpecificMCPArrayMembershipConstraints() throws {
+        let prepared = try OpenAICompatibility.prepareChatRequest(Data(#"""
+        {
+          "model":"composer-2.5",
+          "messages":[{"role":"user","content":"use mcp"}],
+          "tools":[
+            {
+              "type":"function",
+              "function":{
+                "name":"mcp__runner__run_steps",
+                "parameters":{
+                  "type":"object",
+                  "additionalProperties":false,
+                  "properties":{
+                    "steps":{
+                      "type":"array",
+                      "items":{"type":"string"},
+                      "uniqueItems":true,
+                      "contains":{"const":"build"},
+                      "minContains":1,
+                      "maxContains":1
+                    },
+                    "labels":{
+                      "type":"array",
+                      "items":{"type":"string"},
+                      "contains":{"type":"string","pattern":"^release:"},
+                      "minContains":0,
+                      "maxContains":1
+                    }
+                  },
+                  "required":["steps"]
+                }
+              }
+            }
+          ]
+        }
+        """#.utf8))
+        let toolCall = CursorToolCall(name: "mcp", arguments: [
+            "providerIdentifier": .string("runner"),
+            "toolName": .string("run_steps"),
+            "args": .object([
+                "steps": .array([.string("install"), .string("build"), .string("test")]),
+                "labels": .array([.string("release:stable"), .string("ui")])
+            ])
+        ])
+
+        let object = OpenAICompatibility.chatCompletionResponse(
+            id: "chatcmpl_test",
+            created: 1,
+            prepared: prepared,
+            output: CursorSDKOutput(text: "", toolCalls: [toolCall], agentID: "agent-test", runID: "run-test")
+        )
+
+        let choices = try XCTUnwrap(object["choices"] as? [[String: Any]])
+        let message = try XCTUnwrap(choices.first?["message"] as? [String: Any])
+        let toolCalls = try XCTUnwrap(message["tool_calls"] as? [[String: Any]])
+        let function = try XCTUnwrap(toolCalls.first?["function"] as? [String: Any])
+        let arguments = try decodedArguments(function)
+
+        XCTAssertEqual(function["name"] as? String, "mcp__runner__run_steps")
+        XCTAssertEqual(arguments["steps"] as? [String], ["install", "build", "test"])
+        XCTAssertEqual(arguments["labels"] as? [String], ["release:stable", "ui"])
+    }
+
     func testChatToolCallsAllowSpecificMCPPatternProperties() throws {
         let prepared = try OpenAICompatibility.prepareChatRequest(Data(#"""
         {
@@ -7978,6 +8042,61 @@ final class LocalAPIServerTests: XCTestCase {
 
         let object = OpenAICompatibility.responseObject(
             id: "resp_mcp_scalar_invalid",
+            created: 1,
+            prepared: prepared,
+            output: CursorSDKOutput(text: "", toolCalls: [toolCall], agentID: "agent-test", runID: "run-test")
+        )
+
+        let outputItems = try XCTUnwrap(object["output"] as? [[String: Any]])
+        XCTAssertNil(outputItems.first { ($0["type"] as? String) == "function_call" })
+    }
+
+    func testResponsesFunctionCallsDoNotEmitProviderSpecificMCPToolViolatingArrayMembershipConstraints() throws {
+        let prepared = try OpenAICompatibility.prepareResponsesRequest(Data(#"""
+        {
+          "model":"composer-2.5",
+          "input":"run steps",
+          "tools":[
+            {
+              "type":"function",
+              "name":"mcp__runner__run_steps",
+              "parameters":{
+                "type":"object",
+                "additionalProperties":false,
+                "properties":{
+                  "steps":{
+                    "type":"array",
+                    "items":{"type":"string"},
+                    "uniqueItems":true,
+                    "contains":{"const":"build"},
+                    "minContains":1,
+                    "maxContains":1
+                  },
+                  "labels":{
+                    "type":"array",
+                    "items":{"type":"string"},
+                    "contains":{"type":"string","pattern":"^release:"},
+                    "minContains":0,
+                    "maxContains":1
+                  }
+                },
+                "required":["steps"]
+              }
+            }
+          ]
+        }
+        """#.utf8))
+        let toolCall = CursorToolCall(name: "mcp", arguments: [
+            "providerIdentifier": .string("runner"),
+            "toolName": .string("run_steps"),
+            "args": .object([
+                "steps": .array([.string("install"), .string("test")]),
+                "labels": .array([.string("release:stable"), .string("release:beta")])
+            ])
+        ])
+
+        let object = OpenAICompatibility.responseObject(
+            id: "resp_mcp_array_membership_invalid",
             created: 1,
             prepared: prepared,
             output: CursorSDKOutput(text: "", toolCalls: [toolCall], agentID: "agent-test", runID: "run-test")
