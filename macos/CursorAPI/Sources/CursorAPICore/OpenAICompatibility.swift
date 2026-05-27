@@ -184,6 +184,9 @@ public enum OpenAICompatibility {
                     .joined(separator: " ")
                 transcript.append("TOOL RESULT\(label.isEmpty ? "" : " (\(label))"): \(text.isEmpty ? "[empty]" : text)")
                 transcript.append("LOCAL TOOL RESULT: \(toolResultFeedback(toolCallID: toolCallID, toolName: toolName, text: text, remembered: rememberedToolCalls, tools: tools))")
+                if let repairHint = toolResultRepairHint(toolCallID: toolCallID, toolName: toolName, text: text, remembered: rememberedToolCalls, tools: tools, context: toolContext) {
+                    transcript.append(repairHint)
+                }
             } else {
                 transcript.append("\(role.uppercased()): \(text.isEmpty ? "[empty]" : text)")
                 if role == "user", !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -1119,6 +1122,9 @@ public enum OpenAICompatibility {
                         .joined(separator: " ")
                     transcript.append("FUNCTION CALL OUTPUT\(label.isEmpty ? "" : " (\(label))"): \(output.isEmpty ? "[empty]" : output)")
                     transcript.append("LOCAL TOOL RESULT: \(toolResultFeedback(toolCallID: callID, toolName: toolName, text: output, remembered: remembered, tools: tools))")
+                    if let repairHint = toolResultRepairHint(toolCallID: callID, toolName: toolName, text: output, remembered: remembered, tools: tools) {
+                        transcript.append(repairHint)
+                    }
                     continue
                 }
                 if type == "compaction" {
@@ -1723,6 +1729,47 @@ public enum OpenAICompatibility {
         return String(data: data, encoding: .utf8) ?? "{}"
     }
 
+    private static func toolResultRepairHint(
+        toolCallID: String,
+        toolName: String,
+        text: String,
+        remembered: [String: ResponseToolCallMemory],
+        tools: [OpenAIToolSpec],
+        context: ToolCallContext? = nil
+    ) -> String? {
+        guard isClientToolArgumentError(text) else { return nil }
+        let rememberedCall = remembered[toolCallID]
+        let registeredSDKCall = sdkToolCallMemory.memory(id: toolCallID)
+        let clientToolName = toolName.isEmpty ? rememberedCall?.name ?? "" : toolName
+        let tool = toolSpec(named: clientToolName, in: tools)
+        let sdkToolName = rememberedCall?.sdkName
+            ?? registeredSDKCall?.name
+            ?? sdkCanonical(fromToolCallID: toolCallID)
+            ?? sdkFeedbackToolName(for: clientToolName, arguments: rememberedCall?.arguments ?? [:], tool: tool)
+        let sdkArguments = rememberedCall?.sdkArguments
+            ?? registeredSDKCall?.arguments
+            ?? sdkFeedbackArguments(for: clientToolName, arguments: rememberedCall?.arguments ?? [:], tool: tool, sdkToolName: sdkToolName)
+        let hint = toolCallRetryHint(CursorToolCall(name: sdkToolName, arguments: sdkArguments), tools: tools, context: context)
+        return [
+            "LOCAL TOOL ERROR REPAIR:",
+            "The client rejected the previous local tool arguments.",
+            hint,
+            "Do not repeat the rejected arguments; retry once with the normalized client argument shape above, or choose another SDK route from the routing map."
+        ].joined(separator: " ")
+    }
+
+    private static func isClientToolArgumentError(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        return lower.contains("schemaerror")
+            || lower.contains("invalid arguments")
+            || lower.contains("invalid tool")
+            || lower.contains("missing key")
+            || lower.contains("missing required")
+            || lower.contains("satisfies the expected schema")
+            || lower.contains("tool_use_error")
+            || lower.contains("nosuchtool")
+    }
+
     private static func sdkCanonical(fromToolCallID toolCallID: String) -> String? {
         let parts = toolCallID.split(separator: "_").map(String.init)
         guard parts.count >= 2,
@@ -1925,7 +1972,7 @@ public enum OpenAICompatibility {
         }
         let arguments = normalizeArguments(normalizedToolCall.arguments, sdkToolName: normalizedToolCall.name, tool: tool, context: context)
         if toolArgumentsSatisfySchema(arguments, tool: tool) {
-            return "SDK \(normalizedToolCall.name) maps to client \(tool.name); retry with complete arguments for that route."
+            return "SDK \(normalizedToolCall.name) maps to client \(tool.name); retry with normalized arguments \(safeJSONForPrompt(arguments.mapValues(\.foundationValue))). Required client arguments: \(toolRequiredArgumentSummary(tool))."
         }
         return [
             "SDK \(normalizedToolCall.name) mapped to client \(tool.name), but normalized arguments do not satisfy the client JSON schema.",

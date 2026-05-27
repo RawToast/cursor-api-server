@@ -1381,6 +1381,47 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertEqual((arguments["timeout"] as? NSNumber)?.doubleValue, 120_000)
     }
 
+    func testResponsesToolSchemaErrorsAddRepairHintForOpenCodeGlob() throws {
+        let prepared = try OpenAICompatibility.prepareResponsesRequest(Data(#"""
+        {
+          "model":"composer-2.5",
+          "tools":[
+            {
+              "type":"function",
+              "name":"glob",
+              "parameters":{
+                "type":"object",
+                "properties":{
+                  "pattern":{"type":"string"},
+                  "path":{"type":"string"}
+                },
+                "required":["pattern"]
+              }
+            }
+          ],
+          "input":[
+            {"type":"message","role":"user","content":[{"type":"input_text","text":"build a todo app in vite 8 and react"}]},
+            {
+              "type":"function_call",
+              "call_id":"call_glob",
+              "name":"glob",
+              "arguments":"{}"
+            },
+            {
+              "type":"function_call_output",
+              "call_id":"call_glob",
+              "output":"The glob tool was called with invalid arguments: SchemaError(Missing key\n  at [\"pattern\"]).\nPlease rewrite the input so it satisfies the expected schema."
+            }
+          ]
+        }
+        """#.utf8))
+
+        XCTAssertTrue(prepared.prompt.contains("LOCAL TOOL ERROR REPAIR"))
+        XCTAssertTrue(prepared.prompt.contains("SDK glob maps to client glob"))
+        XCTAssertTrue(prepared.prompt.contains(#""pattern":"**/*""#))
+        XCTAssertTrue(prepared.prompt.contains("Do not repeat the rejected arguments"))
+    }
+
     func testResponsesAcceptsServerToolInputSchemasAndSkipsNamelessBuiltins() throws {
         let prepared = try OpenAICompatibility.prepareResponsesRequest(Data(#"""
         {
@@ -1771,6 +1812,55 @@ final class LocalAPIServerTests: XCTestCase {
         """#.utf8))
 
         XCTAssertFalse(continued.prompt.contains("LOCAL TOOL REQUIRED FOR THE LATEST USER REQUEST"))
+    }
+
+    func testChatToolSchemaErrorsAddRepairHintForOpenCodeGlob() throws {
+        let prepared = try OpenAICompatibility.prepareChatRequest(Data(#"""
+        {
+          "model":"composer-2.5",
+          "messages":[
+            {"role":"user","content":"build a todo app in vite 8 and react"},
+            {
+              "role":"assistant",
+              "content":null,
+              "tool_calls":[
+                {
+                  "id":"call_glob",
+                  "type":"function",
+                  "function":{"name":"glob","arguments":"{}"}
+                }
+              ]
+            },
+            {
+              "role":"tool",
+              "tool_call_id":"call_glob",
+              "name":"glob",
+              "content":"The glob tool was called with invalid arguments: SchemaError(Missing key\n  at [\"pattern\"]).\nPlease rewrite the input so it satisfies the expected schema."
+            }
+          ],
+          "tools":[
+            {
+              "type":"function",
+              "function":{
+                "name":"glob",
+                "parameters":{
+                  "type":"object",
+                  "properties":{
+                    "pattern":{"type":"string"},
+                    "path":{"type":"string"}
+                  },
+                  "required":["pattern"]
+                }
+              }
+            }
+          ]
+        }
+        """#.utf8))
+
+        XCTAssertTrue(prepared.prompt.contains("LOCAL TOOL ERROR REPAIR"))
+        XCTAssertTrue(prepared.prompt.contains("SDK glob maps to client glob"))
+        XCTAssertTrue(prepared.prompt.contains(#""pattern":"**/*""#))
+        XCTAssertTrue(prepared.prompt.contains("Do not repeat the rejected arguments"))
     }
 
     func testChatToolInventoryAdvertisesSingleWordClientToolsAsSDKMCP() throws {
