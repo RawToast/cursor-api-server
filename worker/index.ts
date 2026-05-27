@@ -1,5 +1,6 @@
 import { collectCursorOutput, createCursorCompletion, resolveCursorModel, streamCursorText, verifyCursorApiKey } from "./cursor";
 import { collectCursorSdkOutput, createCursorSdkCompletion } from "./cursor-sdk";
+import { sha256Hex } from "./crypto";
 import { authenticateProxyKey, completeRequestLog, createRequestLog, saveSignup } from "./db";
 import { bearerToken, errorResponse, HttpError, json, notFound, openAiError, optionsResponse, parseJsonBody, sseResponse, unauthorized, withCors } from "./http";
 import {
@@ -15,6 +16,7 @@ import {
   responseCreatedEvents,
   responseDeltaEvent,
   responseDoneEvents,
+  responseInputItemsObject,
   responseObject,
   responseTextStartEvents,
   responseToolCallEvents,
@@ -36,6 +38,18 @@ export { CursorSdkBridgeContainer } from "./sdk-bridge-container";
 type AuthResult =
   | { mode: "proxy"; accountId: string; cursorApiKey: string }
   | { mode: "direct"; cursorApiKey: string };
+
+interface StoredResponseState {
+  ownerKey: string;
+  id: string;
+  response?: Record<string, unknown>;
+  inputItems: unknown[];
+  outputItems: unknown[];
+  updatedAt: number;
+}
+
+const responseState = new Map<string, StoredResponseState>();
+const RESPONSE_STATE_LIMIT = 512;
 
 const defaultDeps: Deps = {
   fetch: (input, init) => fetch(input, init),
@@ -190,6 +204,12 @@ async function handleOpenAiRoute(
     return json(modelList({ opencode: route.surface === "opencode" || route.surface === "opencodev2", sdk: route.surface === "opencodev2" }));
   }
 
+  if (route.kind === "response" || route.kind === "responseInputItems" || route.kind === "responseCancel") {
+    const auth = await authenticate(request, env, route);
+    if (!auth) return unauthorized();
+    return handleResponseStateRoute(request, auth, route);
+  }
+
   if (request.method !== "POST") return notFound();
   const auth = await authenticate(request, env, route);
   if (!auth) return unauthorized();
@@ -201,10 +221,17 @@ async function handleOpenAiRoute(
     return handleOpenCodeSdkChatRoute(request, env, ctx, deps, auth, body, cursorModel);
   }
 
+  const responseOwner = route.kind === "responses" ? await responseOwnerKey(auth) : undefined;
+  const previousResponseId = route.kind === "responses" ? previousResponseIdFromBody(body) : undefined;
+  const previousState = previousResponseId && responseOwner ? getResponseState(responseOwner, previousResponseId) : undefined;
+  if (previousResponseId && !previousState) throw new HttpError("Response not found", 404, "not_found");
   const prepared =
     route.kind === "chat"
       ? prepareChatRequest(body, cursorModel, { forceAgentMode: route.surface === "opencode" })
-      : prepareResponsesRequest(body, cursorModel);
+      : prepareResponsesRequest(body, cursorModel, {
+          previousOutput: previousState?.outputItems,
+          previousInputItems: previousState?.inputItems
+        });
   const id = `${route.kind === "chat" ? "chatcmpl" : "resp"}_${crypto.randomUUID().replaceAll("-", "")}`;
   const created = Math.floor(deps.now().getTime() / 1000);
 
@@ -238,11 +265,31 @@ async function handleOpenAiRoute(
         includeUsage: prepared.includeUsage,
         metadata: prepared.responseMetadata,
         tools: prepared.tools,
-        onDone: (_text, completionChars) =>
-          finishLog({
+        onDone: async (text, completionChars, toolCalls) => {
+          if (route.kind === "responses" && responseOwner) {
+            const completed = responseObject({
+              id,
+              created,
+              model: prepared.model,
+              text,
+              toolCalls,
+              promptChars: prepared.promptChars,
+              metadata: prepared.responseMetadata
+            });
+            storeResponseState(responseOwner, {
+              id,
+              response: completed,
+              inputItems: prepared.responseInputItems ?? [],
+              outputItems: (completed.output as unknown[]) ?? [],
+              store: prepared.storeResponse !== false,
+              now: deps.now().getTime()
+            });
+          }
+          return finishLog({
             status: "completed",
             completionChars
-          }),
+          });
+        },
         onError: (error) =>
           finishLog({
             status: "error",
@@ -275,8 +322,7 @@ async function handleOpenAiRoute(
         })
       );
     }
-    return json(
-      responseObject({
+    const response = responseObject({
         id,
         created,
         model: prepared.model,
@@ -284,8 +330,18 @@ async function handleOpenAiRoute(
         toolCalls,
         promptChars: prepared.promptChars,
         metadata: prepared.responseMetadata
-      })
-    );
+      });
+    if (responseOwner) {
+      storeResponseState(responseOwner, {
+        id,
+        response,
+        inputItems: prepared.responseInputItems ?? [],
+        outputItems: (response.output as unknown[]) ?? [],
+        store: prepared.storeResponse !== false,
+        now: deps.now().getTime()
+      });
+    }
+    return json(response);
   } catch (error) {
     await finishLog({
       status: "error",
@@ -405,7 +461,7 @@ function streamOpenAiResponse(
     includeUsage: boolean;
     metadata?: Record<string, unknown>;
     tools: OpenAiToolSpec[];
-    onDone: (text: string, completionChars: number) => Promise<void>;
+    onDone: (text: string, completionChars: number, toolCalls: ReturnType<typeof toOpenAiToolCalls>) => Promise<void>;
     onError: (error: unknown) => Promise<void>;
   },
   ctx: ExecutionContext
@@ -424,7 +480,7 @@ function streamOpenAiEvents(
     includeUsage: boolean;
     metadata?: Record<string, unknown>;
     tools: OpenAiToolSpec[];
-    onDone: (text: string, completionChars: number) => Promise<void>;
+    onDone: (text: string, completionChars: number, toolCalls: ReturnType<typeof toOpenAiToolCalls>) => Promise<void>;
     onError: (error: unknown) => Promise<void>;
   },
   ctx: ExecutionContext
@@ -510,7 +566,7 @@ function streamOpenAiEvents(
           textOutputIndex: responseTextOutputIndex ?? 0
         })) await writer.write(event);
       }
-      await input.onDone(text, completionCharsFromOutput(text, streamedToolCalls));
+      await input.onDone(text, completionCharsFromOutput(text, streamedToolCalls), streamedToolCalls);
     } catch (error) {
       await input.onError(error);
       const message = error instanceof Error ? error.message : "Stream failed";
@@ -533,6 +589,92 @@ function sessionAffinity(request: Request): string | undefined {
 
 function sdkSessionOwner(auth: AuthResult): string | undefined {
   return auth.mode === "proxy" ? `account:${auth.accountId}` : undefined;
+}
+
+async function handleResponseStateRoute(request: Request, auth: AuthResult, route: OpenAiRoute): Promise<Response> {
+  if (!route.responseId) return notFound();
+  const ownerKey = await responseOwnerKey(auth);
+  const state = getResponseState(ownerKey, route.responseId);
+  if (!state) throw new HttpError("Response not found", 404, "not_found");
+
+  if (route.kind === "response") {
+    if (request.method === "GET" || request.method === "HEAD") {
+      if (!state.response) throw new HttpError("Response not found", 404, "not_found");
+      return json(state.response);
+    }
+    if (request.method === "DELETE") {
+      responseState.delete(responseStateKey(ownerKey, route.responseId));
+      return json({ id: route.responseId, object: "response", deleted: true });
+    }
+    return notFound();
+  }
+
+  if (route.kind === "responseInputItems") {
+    if (request.method !== "GET" && request.method !== "HEAD") return notFound();
+    if (!state.response) throw new HttpError("Response not found", 404, "not_found");
+    return json(responseInputItemsObject(state.inputItems));
+  }
+
+  if (route.kind === "responseCancel") {
+    if (request.method !== "POST") return notFound();
+    throw new HttpError("Only background responses can be cancelled. API for Cursor runs responses synchronously.", 400, "invalid_request_error");
+  }
+
+  return notFound();
+}
+
+function previousResponseIdFromBody(body: unknown): string | undefined {
+  if (!isRecordLike(body)) return undefined;
+  const value = body.previous_response_id;
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+async function responseOwnerKey(auth: AuthResult): Promise<string> {
+  if (auth.mode === "proxy") return `account:${auth.accountId}`;
+  return `direct:${(await sha256Hex(auth.cursorApiKey)).slice(0, 24)}`;
+}
+
+function getResponseState(ownerKey: string, responseId: string): StoredResponseState | undefined {
+  return responseState.get(responseStateKey(ownerKey, responseId));
+}
+
+function storeResponseState(
+  ownerKey: string,
+  input: {
+    id: string;
+    response: Record<string, unknown>;
+    inputItems: unknown[];
+    outputItems: unknown[];
+    store: boolean;
+    now: number;
+  }
+) {
+  const key = responseStateKey(ownerKey, input.id);
+  responseState.set(key, {
+    ownerKey,
+    id: input.id,
+    response: input.store ? input.response : undefined,
+    inputItems: input.store ? input.inputItems : [],
+    outputItems: input.outputItems,
+    updatedAt: input.now
+  });
+  pruneResponseState();
+}
+
+function responseStateKey(ownerKey: string, responseId: string): string {
+  return `${ownerKey}:${responseId}`;
+}
+
+function pruneResponseState() {
+  if (responseState.size <= RESPONSE_STATE_LIMIT) return;
+  const entries = [...responseState.entries()].sort((a, b) => a[1].updatedAt - b[1].updatedAt);
+  for (const [key] of entries.slice(0, responseState.size - RESPONSE_STATE_LIMIT)) {
+    responseState.delete(key);
+  }
+}
+
+function isRecordLike(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 async function authenticate(request: Request, env: Env, route: OpenAiRoute): Promise<AuthResult | null> {
@@ -559,8 +701,9 @@ async function authenticate(request: Request, env: Env, route: OpenAiRoute): Pro
 }
 
 interface OpenAiRoute {
-  kind: "chat" | "responses" | "models";
+  kind: "chat" | "responses" | "models" | "response" | "responseInputItems" | "responseCancel";
   accountId?: string;
+  responseId?: string;
   surface?: "standard" | "opencode" | "opencodev2";
 }
 
@@ -577,6 +720,12 @@ function matchOpenAiRoute(pathname: string): OpenAiRoute | null {
   const path = accountMatch ? `/${accountMatch[2]}` : pathname.startsWith("/v1/") ? pathname.slice(3) : "";
   if (path === "/chat/completions") return { kind: "chat", accountId };
   if (path === "/responses") return { kind: "responses", accountId };
+  const responseInputItemsMatch = /^\/responses\/([^/]+)\/input_items\/?$/.exec(path);
+  if (responseInputItemsMatch) return { kind: "responseInputItems", accountId, responseId: responseInputItemsMatch[1] };
+  const responseCancelMatch = /^\/responses\/([^/]+)\/cancel\/?$/.exec(path);
+  if (responseCancelMatch) return { kind: "responseCancel", accountId, responseId: responseCancelMatch[1] };
+  const responseMatch = /^\/responses\/([^/]+)\/?$/.exec(path);
+  if (responseMatch) return { kind: "response", accountId, responseId: responseMatch[1] };
   if (path === "/models") return { kind: "models", accountId };
   return null;
 }

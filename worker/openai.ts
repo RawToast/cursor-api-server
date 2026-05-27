@@ -14,6 +14,9 @@ export interface PreparedRequest {
   responseMetadata: Record<string, unknown>;
   tools: OpenAiToolSpec[];
   requiresLocalTool: boolean;
+  previousResponseId?: string;
+  storeResponse?: boolean;
+  responseInputItems?: unknown[];
 }
 
 export interface OpenAiToolSpec {
@@ -141,7 +144,8 @@ export function prepareChatRequest(body: unknown, cursorModel: { id: string } | 
       top_p: numberOrNull(record.top_p)
     },
     tools,
-    requiresLocalTool: false
+    requiresLocalTool: false,
+    storeResponse: false
   };
 }
 
@@ -207,11 +211,16 @@ export function prepareOpencodeSdkChatRequest(body: unknown, cursorModel: { id: 
       top_p: numberOrNull(record.top_p)
     },
     tools,
-    requiresLocalTool: workspaceMutationRequired && !workspaceMutationDone
+    requiresLocalTool: workspaceMutationRequired && !workspaceMutationDone,
+    storeResponse: false
   };
 }
 
-export function prepareResponsesRequest(body: unknown, cursorModel: { id: string } | undefined): PreparedRequest {
+export function prepareResponsesRequest(
+  body: unknown,
+  cursorModel: { id: string } | undefined,
+  options: { previousOutput?: unknown[]; previousInputItems?: unknown[] } = {}
+): PreparedRequest {
   const record = expectRecord(body, "body");
   validateCommonUnsupported(record);
   if (record.background === true) {
@@ -229,10 +238,15 @@ export function prepareResponsesRequest(body: unknown, cursorModel: { id: string
   const instructions = typeof record.instructions === "string" ? record.instructions.trim() : "";
   if (instructions) transcript.push("", `INSTRUCTIONS:\n${instructions}`);
   transcript.push("", "INPUT:");
-  const { text, images } = responseInputToTextAndImages(record.input);
+  const effectiveInput = responseInputWithPrevious(record.input, options);
+  const { text, images } = responseInputToTextAndImages(effectiveInput);
   transcript.push(text || "[empty]");
   appendResponseOptions(transcript, record);
   const prompt = transcript.join("\n");
+  const previousResponseId = typeof record.previous_response_id === "string" && record.previous_response_id.trim()
+    ? record.previous_response_id.trim()
+    : undefined;
+  const storeResponse = record.store !== false;
   return {
     model,
     cursorModel,
@@ -246,10 +260,15 @@ export function prepareResponsesRequest(body: unknown, cursorModel: { id: string
       temperature: numberOrNull(record.temperature),
       top_p: numberOrNull(record.top_p),
       text: isRecord(record.text) ? record.text : { format: { type: "text" } },
+      previous_response_id: previousResponseId || null,
+      store: storeResponse,
       ...(tools.length ? { tools: responseToolMetadata(tools), tool_choice: responseToolChoiceMetadata(record.tool_choice) } : {})
     },
     tools,
-    requiresLocalTool: false
+    requiresLocalTool: false,
+    previousResponseId,
+    storeResponse,
+    responseInputItems: normalizedResponseInputItems(record.input)
   };
 }
 
@@ -348,6 +367,17 @@ export function responseObject(input: {
     user: null,
     metadata: {},
     ...input.metadata
+  };
+}
+
+export function responseInputItemsObject(inputItems: unknown[] = []): Record<string, unknown> {
+  const data = inputItems.map((item, index) => normalizeResponseInputItem(item, index));
+  return {
+    object: "list",
+    data,
+    first_id: responseInputItemId(data[0]) ?? null,
+    last_id: responseInputItemId(data[data.length - 1]) ?? null,
+    has_more: false
   };
 }
 
@@ -956,6 +986,53 @@ function responseInputToTextAndImages(input: unknown): { text: string; images: C
     }
   }
   return { text: lines.join("\n"), images };
+}
+
+function responseInputWithPrevious(
+  input: unknown,
+  options: { previousOutput?: unknown[]; previousInputItems?: unknown[] }
+): unknown {
+  const previous = [
+    ...(options.previousInputItems ?? []),
+    ...(options.previousOutput ?? [])
+  ];
+  if (!previous.length) return input;
+  return [...previous, ...responseInputArray(input)];
+}
+
+function responseInputArray(input: unknown): unknown[] {
+  if (input === undefined || input === null) return [];
+  return Array.isArray(input) ? input : [input];
+}
+
+function normalizedResponseInputItems(input: unknown): unknown[] {
+  return responseInputArray(input).map(normalizeResponseInputItem);
+}
+
+function normalizeResponseInputItem(item: unknown, index: number): unknown {
+  if (isRecord(item)) {
+    return item.id === undefined ? { ...item, id: `item_${index}` } : item;
+  }
+  return responseInputMessage(responseInputText(item), `item_${index}`);
+}
+
+function responseInputMessage(text: string, id: string): Record<string, unknown> {
+  return {
+    id,
+    type: "message",
+    role: "user",
+    content: [{ type: "input_text", text }]
+  };
+}
+
+function responseInputText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value === undefined || value === null) return "";
+  return JSON.stringify(value);
+}
+
+function responseInputItemId(item: unknown): string | undefined {
+  return isRecord(item) && typeof item.id === "string" ? item.id : undefined;
 }
 
 function responseToolOutputText(output: unknown): string {

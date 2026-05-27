@@ -899,6 +899,207 @@ describe("Worker", () => {
     });
   });
 
+  it("stores Responses for retrieval and input item listing", async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { deps } = fakeDeps();
+
+    const created = await handleRequest(
+      new Request("https://composer.test/v1/responses", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer cursor_direct_key"
+        },
+        body: JSON.stringify({ model: "composer-2.5", input: "Say hello" })
+      }),
+      env,
+      fakeCtx(),
+      deps
+    );
+    const createdBody = (await created.json()) as { id: string };
+
+    const retrieved = await handleRequest(
+      new Request(`https://composer.test/v1/responses/${createdBody.id}`, {
+        headers: { Authorization: "Bearer cursor_direct_key" }
+      }),
+      env,
+      fakeCtx(),
+      deps
+    );
+    await expect(retrieved.json()).resolves.toMatchObject({
+      id: createdBody.id,
+      object: "response",
+      output: [{ type: "message", content: [{ type: "output_text", text: "Hello from Composer" }] }]
+    });
+
+    const inputItems = await handleRequest(
+      new Request(`https://composer.test/v1/responses/${createdBody.id}/input_items`, {
+        headers: { Authorization: "Bearer cursor_direct_key" }
+      }),
+      env,
+      fakeCtx(),
+      deps
+    );
+    await expect(inputItems.json()).resolves.toMatchObject({
+      object: "list",
+      data: [{ id: "item_0", type: "message", role: "user" }],
+      has_more: false
+    });
+  });
+
+  it("continues Responses with previous_response_id context", async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { deps, chatRequestBodies } = fakeDeps();
+
+    const first = await handleRequest(
+      new Request("https://composer.test/v1/responses", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer cursor_direct_key"
+        },
+        body: JSON.stringify({ model: "composer-2.5", input: "Say hello" })
+      }),
+      env,
+      fakeCtx(),
+      deps
+    );
+    const firstBody = (await first.json()) as { id: string };
+
+    const second = await handleRequest(
+      new Request("https://composer.test/v1/responses", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer cursor_direct_key"
+        },
+        body: JSON.stringify({ model: "composer-2.5", previous_response_id: firstBody.id, input: "Say hello" })
+      }),
+      env,
+      fakeCtx(),
+      deps
+    );
+    const secondBody = (await second.json()) as { previous_response_id: string };
+
+    expect(second.status).toBe(200);
+    expect(secondBody.previous_response_id).toBe(firstBody.id);
+    expect(chatRequestBodies[1]).toContain("USER: Say hello");
+    expect(chatRequestBodies[1]).toContain("ASSISTANT: Hello from Composer");
+  });
+
+  it("continues store false Responses without making them retrievable", async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { deps } = fakeDeps();
+
+    const first = await handleRequest(
+      new Request("https://composer.test/v1/responses", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer cursor_direct_key"
+        },
+        body: JSON.stringify({ model: "composer-2.5", store: false, input: "Say hello" })
+      }),
+      env,
+      fakeCtx(),
+      deps
+    );
+    const firstBody = (await first.json()) as { id: string };
+
+    const retrieved = await handleRequest(
+      new Request(`https://composer.test/v1/responses/${firstBody.id}`, {
+        headers: { Authorization: "Bearer cursor_direct_key" }
+      }),
+      env,
+      fakeCtx(),
+      deps
+    );
+    expect(retrieved.status).toBe(404);
+
+    const second = await handleRequest(
+      new Request("https://composer.test/v1/responses", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer cursor_direct_key"
+        },
+        body: JSON.stringify({ model: "composer-2.5", previous_response_id: firstBody.id, input: "Say hello" })
+      }),
+      env,
+      fakeCtx(),
+      deps
+    );
+    const secondBody = (await second.json()) as { previous_response_id: string };
+
+    expect(second.status).toBe(200);
+    expect(secondBody.previous_response_id).toBe(firstBody.id);
+  });
+
+  it("rejects missing or deleted previous Responses", async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { deps } = fakeDeps();
+
+    const missing = await handleRequest(
+      new Request("https://composer.test/v1/responses", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer cursor_direct_key"
+        },
+        body: JSON.stringify({ model: "composer-2.5", previous_response_id: "resp_missing", input: "Say hello" })
+      }),
+      env,
+      fakeCtx(),
+      deps
+    );
+    expect(missing.status).toBe(404);
+
+    const created = await handleRequest(
+      new Request("https://composer.test/v1/responses", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer cursor_direct_key"
+        },
+        body: JSON.stringify({ model: "composer-2.5", input: "Say hello" })
+      }),
+      env,
+      fakeCtx(),
+      deps
+    );
+    const createdBody = (await created.json()) as { id: string };
+
+    const deleted = await handleRequest(
+      new Request(`https://composer.test/v1/responses/${createdBody.id}`, {
+        method: "DELETE",
+        headers: { Authorization: "Bearer cursor_direct_key" }
+      }),
+      env,
+      fakeCtx(),
+      deps
+    );
+    await expect(deleted.json()).resolves.toMatchObject({ id: createdBody.id, deleted: true });
+
+    const afterDelete = await handleRequest(
+      new Request("https://composer.test/v1/responses", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer cursor_direct_key"
+        },
+        body: JSON.stringify({ model: "composer-2.5", previous_response_id: createdBody.id, input: "Say hello" })
+      }),
+      env,
+      fakeCtx(),
+      deps
+    );
+    expect(afterDelete.status).toBe(404);
+  });
+
   it("returns Responses function calls when tools are provided", async () => {
     const db = new FakeD1();
     const env = makeEnv(db);
