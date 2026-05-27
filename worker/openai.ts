@@ -113,7 +113,7 @@ export function prepareChatRequest(body: unknown, cursorModel: { id: string } | 
   const agentMode = options.forceAgentMode === true || tools.length > 0;
   const model = typeof record.model === "string" && record.model.trim() ? record.model.trim() : "composer-2.5";
   const workspaceMutationRequired = hasWorkspaceMutationIntent(messages) && hasWorkspaceMutationCapability(tools);
-  const workspaceMutationDone = workspaceMutationRequired && hasWorkspaceMutationToolCall(messages);
+  const workspaceMutationDone = workspaceMutationRequired && hasWorkspaceMutationToolCall(messages, tools);
   const transcript: string[] = [tools.length ? TOOL_SYSTEM_DIRECTIVE : agentMode ? AGENT_SYSTEM_DIRECTIVE : SYSTEM_DIRECTIVE];
   appendChatTools(transcript, tools, record.tool_choice);
   appendWorkspaceMutationRequirement(transcript, workspaceMutationRequired, workspaceMutationDone);
@@ -167,7 +167,7 @@ export function prepareOpencodeSdkChatRequest(body: unknown, cursorModel: { id: 
   const tools = record.tool_choice === "none" ? [] : parseChatTools(record.tools);
   const model = typeof record.model === "string" && record.model.trim() ? record.model.trim() : "composer-2.5";
   const workspaceMutationRequired = hasWorkspaceMutationIntent(messages) && hasWorkspaceMutationCapability(tools);
-  const workspaceMutationDone = workspaceMutationRequired && hasWorkspaceMutationToolCall(messages);
+  const workspaceMutationDone = workspaceMutationRequired && hasWorkspaceMutationToolCall(messages, tools);
   const latestUserText = latestUserTextFromMessages(messages);
   const transcript: string[] = [
     "You are running through an SDK-compatible OpenCode harness.",
@@ -238,7 +238,7 @@ export function prepareResponsesRequest(
   const model = typeof record.model === "string" && record.model.trim() ? record.model.trim() : "composer-2.5";
   const latestUserText = latestUserTextFromResponseInput(record.input);
   const workspaceMutationRequired = hasResponseWorkspaceMutationIntent(record.input) && hasWorkspaceMutationCapability(tools);
-  const workspaceMutationDone = workspaceMutationRequired && hasResponseWorkspaceMutationToolCall(record.input);
+  const workspaceMutationDone = workspaceMutationRequired && hasResponseWorkspaceMutationToolCall(record.input, tools);
   const transcript: string[] = [tools.length ? RESPONSES_TOOL_SYSTEM_DIRECTIVE : SYSTEM_DIRECTIVE];
   appendResponsesToolInventory(transcript, tools, record.tool_choice);
   appendResponsesWorkspaceMutationRequirement(transcript, workspaceMutationRequired, workspaceMutationDone, tools, latestUserText);
@@ -1162,35 +1162,143 @@ function latestUserTextFromResponseInput(input: unknown): string {
   return "";
 }
 
-function hasWorkspaceMutationToolCall(messages: unknown[]): boolean {
+function hasWorkspaceMutationToolCall(messages: unknown[], tools: OpenAiToolSpec[] = []): boolean {
+  let sawLatestUser = false;
+  let mutationAfterLatestUser = false;
   for (const message of messages) {
     if (!isRecord(message)) continue;
-    if (typeof message.name === "string" && isWorkspaceMutationToolCall(message.name, undefined)) return true;
+    const role = typeof message.role === "string" ? message.role : "user";
+    if (role === "user" && contentToPlainText(message.content).trim()) {
+      sawLatestUser = true;
+      mutationAfterLatestUser = false;
+    }
+    if (sawLatestUser && typeof message.name === "string" && isWorkspaceMutationToolCall(message.name, undefined, tools)) {
+      mutationAfterLatestUser = true;
+    }
     if (!Array.isArray(message.tool_calls)) continue;
     for (const toolCall of message.tool_calls) {
       if (!isRecord(toolCall)) continue;
       const fn = isRecord(toolCall.function) ? toolCall.function : undefined;
-      if (typeof fn?.name === "string" && isWorkspaceMutationToolCall(fn.name, fn.arguments)) return true;
+      if (sawLatestUser && typeof fn?.name === "string" && isWorkspaceMutationToolCall(fn.name, fn.arguments, tools)) {
+        mutationAfterLatestUser = true;
+      }
     }
   }
-  return false;
+  return mutationAfterLatestUser;
 }
 
-function hasResponseWorkspaceMutationToolCall(input: unknown): boolean {
+function hasResponseWorkspaceMutationToolCall(input: unknown, tools: OpenAiToolSpec[] = []): boolean {
   if (!Array.isArray(input)) return false;
+  let sawLatestUser = false;
+  let mutationAfterLatestUser = false;
   for (const item of input) {
-    if (!isRecord(item) || item.type !== "function_call" || typeof item.name !== "string") continue;
-    if (isWorkspaceMutationToolCall(item.name, item.arguments)) return true;
+    if (typeof item === "string" && item.trim()) {
+      sawLatestUser = true;
+      mutationAfterLatestUser = false;
+      continue;
+    }
+    if (!isRecord(item)) continue;
+    if (item.type === "message" || typeof item.role === "string") {
+      const role = typeof item.role === "string" ? item.role : "user";
+      if (role === "user" && contentToPlainText(item.content).trim()) {
+        sawLatestUser = true;
+        mutationAfterLatestUser = false;
+      }
+      continue;
+    }
+    if (!sawLatestUser || item.type !== "function_call" || typeof item.name !== "string") continue;
+    if (isWorkspaceMutationToolCall(item.name, item.arguments, tools)) mutationAfterLatestUser = true;
+  }
+  return mutationAfterLatestUser;
+}
+
+function isWorkspaceMutationToolCall(name: string, args: unknown, tools: OpenAiToolSpec[] = []): boolean {
+  const parsed = parseToolCallArguments(args);
+  const canonical = canonicalToolName(name);
+  if (["write", "edit", "delete"].includes(canonical)) return true;
+  if (canonical === "shell") {
+    const command = firstStringArgFromRecords(parsed, ["command", "cmd", "script", "input"]);
+    return command ? isFileMutatingShellCommand(command) : false;
+  }
+
+  const tool = tools.length ? resolveToolSpec(name, parsed, tools) : undefined;
+  if (!tool) return false;
+  if (schemaLooksCompatible("shell", tool)) {
+    const command = firstStringArgFromRecords(parsed, ["command", "cmd", "script", "input"]);
+    if (command && isFileMutatingShellCommand(command)) return true;
+  }
+  if (
+    (schemaLooksCompatible("write", tool) ||
+      schemaLooksCompatible("edit", tool) ||
+      schemaLooksCompatible("delete", tool)) &&
+    looksLikeWorkspaceMutationArguments(parsed)
+  ) {
+    return true;
   }
   return false;
 }
 
-function isWorkspaceMutationToolCall(name: string, args: unknown): boolean {
-  const normalized = normalizeToolName(name);
-  if (["write", "writefile", "edit", "editfile"].includes(normalized)) return true;
-  if (!["bash", "shell", "terminal"].includes(normalized)) return false;
-  const command = firstStringArg(parseToolCallArguments(args), "command", "cmd", "script");
-  return command ? isFileMutatingShellCommand(command) : false;
+function argumentRecords(args: Record<string, unknown>, depth = 0): Record<string, unknown>[] {
+  if (depth > 3 || Array.isArray(args)) return [args];
+  const records = [args];
+  for (const key of wrapperObjectPropertyCandidates()) {
+    const nested = recordArgumentValue(args[key]);
+    if (!nested || Array.isArray(nested)) continue;
+    records.push(...argumentRecords(nested, depth + 1));
+  }
+  return records;
+}
+
+function firstStringArgFromRecords(args: Record<string, unknown>, keys: string[]): string | undefined {
+  for (const record of argumentRecords(args)) {
+    const value = firstStringArg(record, ...keys);
+    if (value) return value;
+  }
+  return undefined;
+}
+
+function looksLikeWorkspaceMutationArguments(args: Record<string, unknown>): boolean {
+  for (const record of argumentRecords(args)) {
+    const path = firstArg(record, [...pathCandidates(), "target_file", "targetFile"]);
+    const hasPath = path !== undefined && shouldIncludeOptionalPath(path);
+    const patch = firstStringArgAllowEmpty(record, "patchContent", "patch_content", "patch", "diff", "unifiedDiff", "unified_diff");
+    if (patch !== undefined) return true;
+
+    const operation = firstStringArg(record, ...operationPropertyCandidates());
+    const normalizedOperation = operation ? normalizeToolName(operation) : "";
+    const mutatingOperation = [
+      "write",
+      "create",
+      "overwrite",
+      "replace",
+      "edit",
+      "update",
+      "delete",
+      "remove",
+      "strreplace"
+    ].includes(normalizedOperation);
+    if (!hasPath) continue;
+
+    const content = firstStringArgAllowEmpty(
+      record,
+      "fileText",
+      "file_text",
+      "content",
+      "contents",
+      "text",
+      "fileContent",
+      "file_content",
+      "streamContent",
+      "stream_content"
+    );
+    const oldText = firstStringArgAllowEmpty(record, "oldString", "old_string", "old_str", "oldText", "old_text", "search", "searchString", "search_string");
+    const newText = firstStringArgAllowEmpty(record, "newString", "new_string", "new_str", "newText", "new_text", "replacement", "replace");
+
+    if (content !== undefined && (!operation || mutatingOperation)) return true;
+    if (oldText !== undefined && newText !== undefined && (!operation || mutatingOperation)) return true;
+    if (["delete", "remove"].includes(normalizedOperation)) return true;
+  }
+  return false;
 }
 
 function isFileMutatingShellCommand(command: string): boolean {

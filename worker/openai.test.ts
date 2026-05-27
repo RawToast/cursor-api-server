@@ -330,6 +330,68 @@ describe("OpenAI compatibility adapter", () => {
     expect(prepared.requiresLocalTool).toBe(true);
   });
 
+  it("marks SDK workspace mutation done after a schema-compatible custom writer call", () => {
+    const prepared = prepareOpencodeSdkChatRequest(
+      {
+        model: "composer-2.5-sdk",
+        messages: [
+          { role: "user", content: "build a todo app in vite 8 and react" },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "call_project_file",
+                type: "function",
+                function: {
+                  name: "project_files",
+                  arguments: JSON.stringify({
+                    input: {
+                      action: "write",
+                      path: "src/App.tsx",
+                      content: "export default function App() { return null; }"
+                    }
+                  })
+                }
+              }
+            ]
+          },
+          { role: "tool", tool_call_id: "call_project_file", name: "project_files", content: "Wrote src/App.tsx" }
+        ],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "project_files",
+              parameters: {
+                type: "object",
+                properties: {
+                  input: {
+                    type: "object",
+                    properties: {
+                      action: { type: "string", enum: ["read", "write", "replace", "delete"] },
+                      path: { type: "string" },
+                      content: { type: "string" },
+                      old: { type: "string" },
+                      replacement: { type: "string" }
+                    },
+                    required: ["action", "path"]
+                  }
+                },
+                required: ["input"]
+              }
+            }
+          }
+        ]
+      },
+      { id: "composer-2.5-sdk" }
+    );
+
+    expect(prepared.prompt.text).toContain("A file-mutating tool call has already been made");
+    expect(prepared.prompt.text).not.toContain("No file-mutating tool call has been made yet");
+    expect(prepared.requiresLocalTool).toBe(false);
+  });
+
   it("does not force SDK workspace mutation when no writable or shell tool is compatible", () => {
     const prepared = prepareOpencodeSdkChatRequest(
       {
@@ -435,6 +497,44 @@ describe("OpenAI compatibility adapter", () => {
 
     expect(prepared.prompt.text).toContain("A file-mutating tool call has already been made");
     expect(prepared.prompt.text).not.toContain("No file-mutating tool call has been made yet");
+    expect(prepared.requiresLocalTool).toBe(false);
+  });
+
+  it("marks Responses workspace mutation done after an apply_patch function call", () => {
+    const prepared = prepareResponsesRequest(
+      {
+        model: "composer-2.5",
+        input: [
+          { role: "user", content: [{ type: "input_text", text: "build a todo app in vite 8 and react" }] },
+          {
+            type: "function_call",
+            call_id: "call_patch",
+            name: "apply_patch",
+            arguments: JSON.stringify({
+              patch: "*** Begin Patch\n*** Add File: src/App.tsx\n+export default function App() { return null; }\n*** End Patch"
+            })
+          },
+          { type: "function_call_output", call_id: "call_patch", output: "Done" }
+        ],
+        tools: [
+          {
+            type: "function",
+            name: "apply_patch",
+            parameters: {
+              type: "object",
+              properties: {
+                patch: { type: "string" }
+              },
+              required: ["patch"]
+            }
+          }
+        ]
+      },
+      { id: "composer-2.5" }
+    );
+
+    expect(prepared.prompt.text).toContain("A file-mutating tool call has already been made");
+    expect(prepared.prompt.text).not.toContain("Use SDK write now");
     expect(prepared.requiresLocalTool).toBe(false);
   });
 

@@ -1453,6 +1453,60 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertTrue(prepared.prompt.contains("For creating or overwriting a file, use SDK write with path and fileText."))
     }
 
+    func testChatBuildAppRequestDoesNotRepeatRequiredHintAfterCustomWriterCall() throws {
+        let prepared = try OpenAICompatibility.prepareChatRequest(Data(#"""
+        {
+          "model": "composer-2.5",
+          "messages": [
+            {"role": "user", "content": "build a todo app in vite 8 and react"},
+            {
+              "role": "assistant",
+              "content": null,
+              "tool_calls": [
+                {
+                  "id": "call_project_file",
+                  "type": "function",
+                  "function": {
+                    "name": "project_files",
+                    "arguments": "{\"input\":{\"action\":\"write\",\"path\":\"src/App.tsx\",\"content\":\"export default function App() { return null; }\"}}"
+                  }
+                }
+              ]
+            },
+            {"role": "tool", "tool_call_id": "call_project_file", "name": "project_files", "content": "Wrote src/App.tsx"}
+          ],
+          "tools": [
+            {
+              "type": "function",
+              "function": {
+                "name": "project_files",
+                "parameters": {
+                  "type": "object",
+                  "properties": {
+                    "input": {
+                      "type": "object",
+                      "properties": {
+                        "action": {"type": "string", "enum": ["read", "write", "replace", "delete"]},
+                        "path": {"type": "string"},
+                        "content": {"type": "string"},
+                        "old": {"type": "string"},
+                        "replacement": {"type": "string"}
+                      },
+                      "required": ["action", "path"]
+                    }
+                  },
+                  "required": ["input"]
+                }
+              }
+            }
+          ]
+        }
+        """#.utf8))
+
+        XCTAssertTrue(prepared.prompt.contains("The above tool calls have been executed. Continue your response based on these results."))
+        XCTAssertFalse(prepared.prompt.contains("LOCAL TOOL REQUIRED FOR THE LATEST USER REQUEST"))
+    }
+
     func testChatFileRequestUsesSchemaCompatibleShellHint() throws {
         let prepared = try OpenAICompatibility.prepareChatRequest(Data(#"""
         {
@@ -1526,6 +1580,40 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertTrue(prepared.prompt.contains("LOCAL TOOL REQUIRED FOR THE LATEST USER REQUEST"))
         XCTAssertTrue(prepared.prompt.contains("Emit exactly one SDK tool call next and no prose."))
         XCTAssertTrue(prepared.prompt.contains("Use SDK shell now."))
+    }
+
+    func testResponsesFileRequestDoesNotRepeatRequiredHintAfterApplyPatchCall() throws {
+        let prepared = try OpenAICompatibility.prepareResponsesRequest(Data(#"""
+        {
+          "model": "composer-2.5",
+          "input": [
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "build a todo app in vite 8 and react"}]},
+            {
+              "type": "function_call",
+              "call_id": "call_patch",
+              "name": "apply_patch",
+              "arguments": "{\"patch\":\"*** Begin Patch\\n*** Add File: src/App.tsx\\n+export default function App() { return null; }\\n*** End Patch\"}"
+            },
+            {"type": "function_call_output", "call_id": "call_patch", "output": "Done"}
+          ],
+          "tools": [
+            {
+              "type": "function",
+              "name": "apply_patch",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "patch": {"type": "string"}
+                },
+                "required": ["patch"]
+              }
+            }
+          ]
+        }
+        """#.utf8))
+
+        XCTAssertTrue(prepared.prompt.contains("The above tool calls have been executed. Continue your response based on these results."))
+        XCTAssertFalse(prepared.prompt.contains("LOCAL TOOL REQUIRED FOR THE LATEST USER REQUEST"))
     }
 
     func testChatFileRequestPrefersExplicitOpenCodeMCPToolHint() throws {

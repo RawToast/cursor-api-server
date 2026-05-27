@@ -123,6 +123,7 @@ public enum OpenAICompatibility {
         var rememberedToolCalls: [String: ResponseToolCallMemory] = [:]
         var sawToolResult = false
         var latestUserText = ""
+        var mutationToolCallAfterLatestUser = false
 
         for item in messages {
             let role = (item["role"] as? String) ?? "user"
@@ -140,19 +141,24 @@ public enum OpenAICompatibility {
                 transcript.append("\(role.uppercased()): \(text.isEmpty ? "[empty]" : text)")
                 if role == "user", !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     latestUserText = text
+                    mutationToolCallAfterLatestUser = false
                 }
             }
 
             if let toolCalls = item["tool_calls"] as? [[String: Any]] {
                 appendToolCallTranscript(&transcript, role: role, toolCalls: toolCalls)
                 rememberToolCalls(toolCalls, into: &rememberedToolCalls)
+                if !latestUserText.isEmpty,
+                   toolCalls.contains(where: { isWorkspaceMutationToolCall($0, tools: tools) }) {
+                    mutationToolCallAfterLatestUser = true
+                }
             }
         }
         if sawToolResult {
             transcript.append("")
             transcript.append(toolResultContinuation)
         }
-        if shouldRequireLocalTool(for: latestUserText, tools: tools) {
+        if shouldRequireLocalTool(for: latestUserText, tools: tools), !mutationToolCallAfterLatestUser {
             appendRequiredLocalToolHint(&transcript, tools: tools, latestUserText: latestUserText)
         }
         appendOptions(&transcript, raw)
@@ -274,6 +280,7 @@ public enum OpenAICompatibility {
         transcript.append("INPUT:")
         var rememberedToolCalls = rememberedToolCalls
         let input = raw["input"]
+        let latestUserText = latestUserText(from: input)
         let appendedInput = appendResponsesInput(input, to: &transcript, remembered: &rememberedToolCalls)
         if !appendedInput.appended {
             transcript.append("[empty]")
@@ -282,8 +289,9 @@ public enum OpenAICompatibility {
             transcript.append("")
             transcript.append(toolResultContinuation)
         }
-        if shouldRequireLocalTool(for: latestUserText(from: input), tools: tools) {
-            appendRequiredLocalToolHint(&transcript, tools: tools, latestUserText: latestUserText(from: input))
+        if shouldRequireLocalTool(for: latestUserText, tools: tools),
+           !hasResponseWorkspaceMutationToolCallAfterLatestUser(input, tools: tools) {
+            appendRequiredLocalToolHint(&transcript, tools: tools, latestUserText: latestUserText)
         }
         appendOptions(&transcript, raw)
         let prompt = transcript.joined(separator: "\n")
@@ -1181,6 +1189,163 @@ public enum OpenAICompatibility {
         let wantsCommand = lower.range(of: #"\b(run|execute|start|launch)\b"#, options: .regularExpression) != nil
             && (lower.contains("command") || lower.contains("shell") || lower.contains("terminal") || lower.contains("server"))
         return wantsCommand && hasCompatibleTool("shell", in: tools)
+    }
+
+    private static func isWorkspaceMutationToolCall(_ toolCall: [String: Any], tools: [OpenAIToolSpec]) -> Bool {
+        guard let function = toolCall["function"] as? [String: Any],
+              let name = stringValue(function["name"]) else {
+            return false
+        }
+        return isWorkspaceMutationToolCall(name: name, arguments: jsonArguments(from: function["arguments"]), tools: tools)
+    }
+
+    private static func hasResponseWorkspaceMutationToolCallAfterLatestUser(_ input: Any?, tools: [OpenAIToolSpec]) -> Bool {
+        guard let items = input as? [Any] else { return false }
+        var sawLatestUser = false
+        var mutationAfterLatestUser = false
+        for item in items {
+            if let text = item as? String, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                sawLatestUser = true
+                mutationAfterLatestUser = false
+                continue
+            }
+            guard let object = item as? [String: Any] else { continue }
+            let type = (object["type"] as? String) ?? ""
+            if type == "function_call" {
+                if sawLatestUser,
+                   let name = stringValue(object["name"]),
+                   isWorkspaceMutationToolCall(name: name, arguments: jsonArguments(from: object["arguments"]), tools: tools) {
+                    mutationAfterLatestUser = true
+                }
+                continue
+            }
+            if type == "message" || object["role"] != nil {
+                let role = (object["role"] as? String) ?? "user"
+                let text = contentText(object["content"], role: role)
+                if role == "user", !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    sawLatestUser = true
+                    mutationAfterLatestUser = false
+                }
+            }
+        }
+        return mutationAfterLatestUser
+    }
+
+    private static func isWorkspaceMutationToolCall(name: String, arguments: [String: JSONValue], tools: [OpenAIToolSpec]) -> Bool {
+        let canonical = canonicalToolName(name)
+        if ["write", "edit", "delete"].contains(canonical) {
+            return true
+        }
+        if canonical == "shell" {
+            guard let command = firstStringArgument(inRecords: arguments, keys: ["command", "cmd", "script", "input"]) else {
+                return false
+            }
+            return isFileMutatingShellCommand(command)
+        }
+
+        guard let tool = resolveToolSpec(name, arguments: arguments, tools: tools) else {
+            return false
+        }
+        if schemaLooksCompatible(sdkToolName: "shell", tool: tool),
+           let command = firstStringArgument(inRecords: arguments, keys: ["command", "cmd", "script", "input"]),
+           isFileMutatingShellCommand(command) {
+            return true
+        }
+        if (schemaLooksCompatible(sdkToolName: "write", tool: tool)
+            || schemaLooksCompatible(sdkToolName: "edit", tool: tool)
+            || schemaLooksCompatible(sdkToolName: "delete", tool: tool)),
+           looksLikeWorkspaceMutationArguments(arguments) {
+            return true
+        }
+        return false
+    }
+
+    private static func jsonArguments(from value: Any?) -> [String: JSONValue] {
+        if let object = value as? [String: Any] {
+            return object.mapValues(JSONValue.from)
+        }
+        guard let string = value as? String,
+              let data = string.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return [:]
+        }
+        return object.mapValues(JSONValue.from)
+    }
+
+    private static func argumentRecords(_ arguments: [String: JSONValue], depth: Int = 0) -> [[String: JSONValue]] {
+        guard depth <= 3 else { return [arguments] }
+        var records = [arguments]
+        for key in wrapperObjectPropertyAliases() {
+            guard let nested = firstArgument(in: arguments, keys: [key])?.value,
+                  let object = objectArgumentValue(nested) else {
+                continue
+            }
+            records.append(contentsOf: argumentRecords(object, depth: depth + 1))
+        }
+        return records
+    }
+
+    private static func firstStringArgument(inRecords arguments: [String: JSONValue], keys: [String]) -> String? {
+        for record in argumentRecords(arguments) {
+            if let value = firstArgument(in: record, keys: keys)?.value.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !value.isEmpty {
+                return value
+            }
+        }
+        return nil
+    }
+
+    private static func looksLikeWorkspaceMutationArguments(_ arguments: [String: JSONValue]) -> Bool {
+        for record in argumentRecords(arguments) {
+            if firstArgument(in: record, keys: ["patchContent", "patch_content", "patch", "diff", "unifiedDiff", "unified_diff"])?.value.stringValue != nil {
+                return true
+            }
+            let path = firstArgument(in: record, keys: pathPropertyAliases() + ["target_file", "targetFile"])?.value
+            let hasPath = path.map(shouldIncludeOptionalPath) ?? false
+            guard hasPath else { continue }
+
+            let operation = firstArgument(in: record, keys: operationPropertyAliases())?.value.stringValue
+            let normalizedOperation = operation.map(normalizedName) ?? ""
+            let mutatingOperations = Set(["write", "create", "overwrite", "replace", "edit", "update", "delete", "remove", "strreplace"])
+            let mutatingOperation = mutatingOperations.contains(normalizedOperation)
+
+            let content = firstArgument(
+                in: record,
+                keys: ["fileText", "file_text", "content", "contents", "text", "fileContent", "file_content", "streamContent", "stream_content"]
+            )?.value.stringValue
+            let oldText = firstArgument(
+                in: record,
+                keys: ["oldString", "old_string", "old_str", "oldText", "old_text", "search", "searchString", "search_string"]
+            )?.value.stringValue
+            let newText = firstArgument(
+                in: record,
+                keys: ["newString", "new_string", "new_str", "newText", "new_text", "replacement", "replace"]
+            )?.value.stringValue
+
+            if content != nil, operation == nil || mutatingOperation {
+                return true
+            }
+            if oldText != nil, newText != nil, operation == nil || mutatingOperation {
+                return true
+            }
+            if ["delete", "remove"].contains(normalizedOperation) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func isFileMutatingShellCommand(_ command: String) -> Bool {
+        let text = command.lowercased()
+        let patterns = [
+            #"(^|[\s;&|])(?:cat|printf|echo)\b[\s\S]*(?:>|>>|<<)"#,
+            #"(?:^|[\s;&|])(?:tee|touch|cp|mv|rm)\b"#,
+            #"(?:^|[\s;&|])sed\b[^\n]*(?:\s-i\b|\s-i['"]?\s)"#,
+            #"(?:^|[\s;&|])perl\b[^\n]*(?:\s-pi\b|\s-pi['"]?\s)"#,
+            #"(?:^|[\s;&|])(?:npm|pnpm|yarn|bun)\s+(?:init|install|add|create)\b"#,
+            #"(?:>|>>)\s*(?:\.{0,2}/)?[a-z0-9._/-]+"#
+        ]
+        return patterns.contains { text.range(of: $0, options: .regularExpression) != nil }
     }
 
     private static func hasAnyCompatibleTool(_ canonicalNames: [String], in tools: [OpenAIToolSpec]) -> Bool {
@@ -2316,9 +2481,9 @@ public enum OpenAICompatibility {
         }
         switch canonical {
         case "shell":
-            return has(["command", "cmd", "script"])
+            return has(["command", "cmd", "script", "input"])
         case "write":
-            return has(pathPropertyAliases()) && has(["fileText", "file_text", "content", "contents", "text"])
+            return has(pathPropertyAliases()) && has(["fileText", "file_text", "content", "contents", "text", "fileContent", "file_content"])
         case "read", "delete":
             return has(pathPropertyAliases())
         case "edit":
