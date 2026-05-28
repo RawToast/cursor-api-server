@@ -60,44 +60,44 @@ jobs:
         run: |
           set -euo pipefail
           python3 - "$GITHUB_EVENT_PATH" "$GITHUB_EVENT_NAME" <<'PY'
-import json
-import os
-import sys
+          import json
+          import os
+          import sys
 
-event_path, event_name = sys.argv[1], sys.argv[2]
-with open(event_path, "r", encoding="utf-8") as handle:
-    event = json.load(handle)
+          event_path, event_name = sys.argv[1], sys.argv[2]
+          with open(event_path, "r", encoding="utf-8") as handle:
+              event = json.load(handle)
 
-if event_name == "repository_dispatch":
-    payload = event.get("client_payload") or {}
-else:
-    payload = event.get("inputs") or {}
+          if event_name == "repository_dispatch":
+              payload = event.get("client_payload") or {}
+          else:
+              payload = event.get("inputs") or {}
 
-values = {
-    "version": payload.get("version", ""),
-    "build": payload.get("build", ""),
-    "source_run_id": payload.get("sourceRunId") or payload.get("source_run_id", ""),
-    "artifact_name": payload.get("artifactName") or payload.get("artifact_name", ""),
-    "dmg_name": payload.get("dmgName") or payload.get("dmg_name", ""),
-    "submission_id": payload.get("submissionId") or payload.get("submission_id", ""),
-    "ref": payload.get("ref", ""),
-}
-missing = [key for key, value in values.items() if not value]
-if missing:
-    raise SystemExit(f"Missing finalizer metadata: {', '.join(missing)}")
+          values = {
+              "version": payload.get("version", ""),
+              "build": payload.get("build", ""),
+              "source_run_id": payload.get("sourceRunId") or payload.get("source_run_id", ""),
+              "artifact_name": payload.get("artifactName") or payload.get("artifact_name", ""),
+              "dmg_name": payload.get("dmgName") or payload.get("dmg_name", ""),
+              "submission_id": payload.get("submissionId") or payload.get("submission_id", ""),
+              "ref": payload.get("ref", ""),
+          }
+          missing = [key for key, value in values.items() if not value]
+          if missing:
+              raise SystemExit(f"Missing finalizer metadata: {', '.join(missing)}")
 
-tag = values["ref"].removeprefix("refs/tags/")
-if tag == values["ref"]:
-    tag = f"v{values['version']}"
+          tag = values["ref"].removeprefix("refs/tags/")
+          if tag == values["ref"]:
+              tag = f"v{values['version']}"
 
-with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-    for key, value in values.items():
-        output.write(f"{key}={value}\n")
-    output.write(f"tag={tag}\n")
-with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
-    env.write(f"CURSOR_API_APP_VERSION={values['version']}\n")
-    env.write(f"CURSOR_API_APP_BUILD={values['build']}\n")
-PY
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              for key, value in values.items():
+                  output.write(f"{key}={value}\n")
+              output.write(f"tag={tag}\n")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+              env.write(f"CURSOR_API_APP_VERSION={values['version']}\n")
+              env.write(f"CURSOR_API_APP_BUILD={values['build']}\n")
+          PY
 
       - name: Check out repository
         uses: actions/checkout@v4

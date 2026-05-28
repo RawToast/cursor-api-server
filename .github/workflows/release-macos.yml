@@ -161,21 +161,21 @@ jobs:
           if [ -n "${NOTARY_WEBHOOK_TOKEN:-}" ]; then
             webhook_url="$(
               python3 - <<'PY'
-import os
-from urllib.parse import quote, urlencode
+          import os
+          from urllib.parse import quote, urlencode
 
-token = os.environ["NOTARY_WEBHOOK_TOKEN"]
-base = "https://api-for-composer.standardagents.ai/api/notary/webhook"
-params = {
-    "version": os.environ["CURSOR_API_APP_VERSION"],
-    "build": os.environ["CURSOR_API_APP_BUILD"],
-    "run_id": os.environ["GITHUB_RUN_ID"],
-    "artifact": f"api-for-cursor-macos-pending-{os.environ['CURSOR_API_APP_VERSION']}-{os.environ['CURSOR_API_APP_BUILD']}",
-    "dmg": os.environ["DMG_NAME"],
-    "ref": os.environ["GITHUB_REF"],
-}
-print(f"{base}/{quote(token, safe='')}?{urlencode(params)}")
-PY
+          token = os.environ["NOTARY_WEBHOOK_TOKEN"]
+          base = "https://api-for-composer.standardagents.ai/api/notary/webhook"
+          params = {
+              "version": os.environ["CURSOR_API_APP_VERSION"],
+              "build": os.environ["CURSOR_API_APP_BUILD"],
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "artifact": f"api-for-cursor-macos-pending-{os.environ['CURSOR_API_APP_VERSION']}-{os.environ['CURSOR_API_APP_BUILD']}",
+              "dmg": os.environ["DMG_NAME"],
+              "ref": os.environ["GITHUB_REF"],
+          }
+          print(f"{base}/{quote(token, safe='')}?{urlencode(params)}")
+          PY
             )"
             pending_ok="1"
           fi
