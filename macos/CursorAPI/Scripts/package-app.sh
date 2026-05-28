@@ -47,8 +47,8 @@ Usage: $0 [--development|--release]
                  current environment.
 
 Environment:
-  CURSOR_API_BRIDGE_RUNTIME_BINARY  Node or Bun runtime to bundle. Defaults to
-                                    Node when available, then Bun.
+  CURSOR_API_BRIDGE_RUNTIME_BINARY  Bun or Node runtime to bundle. Defaults to
+                                    Bun when available, then Node.
   CURSOR_API_BRIDGE_RUNTIME_NAME    Runtime resource name when the binary name
                                     is ambiguous: bun or node.
   CURSOR_API_CODE_SIGN_IDENTITY     Signing identity. Defaults to ad-hoc (-).
@@ -87,13 +87,13 @@ fi
 cp "$APP_ICON_SOURCE" "$RESOURCES_DIR/APIForCursor.png"
 [ -s "$BRIDGE_SCRIPT_SOURCE" ] || { echo "Missing SDK bridge script at $BRIDGE_SCRIPT_SOURCE" >&2; exit 1; }
 cp "$BRIDGE_SCRIPT_SOURCE" "$RESOURCES_DIR/cursor-sdk-local-agent-bridge.mjs"
-if [ -z "$BRIDGE_RUNTIME_SOURCE" ] && command -v node >/dev/null 2>&1; then
-  BRIDGE_RUNTIME_SOURCE="$(node -p 'process.execPath' 2>/dev/null || true)"
-  BRIDGE_RUNTIME_NAME="node"
-fi
 if [ -z "$BRIDGE_RUNTIME_SOURCE" ] && command -v bun >/dev/null 2>&1; then
   BRIDGE_RUNTIME_SOURCE="$(command -v bun)"
   BRIDGE_RUNTIME_NAME="bun"
+fi
+if [ -z "$BRIDGE_RUNTIME_SOURCE" ] && command -v node >/dev/null 2>&1; then
+  BRIDGE_RUNTIME_SOURCE="$(node -p 'process.execPath' 2>/dev/null || true)"
+  BRIDGE_RUNTIME_NAME="node"
 fi
 [ -n "$BRIDGE_RUNTIME_SOURCE" ] || { echo "Missing bridge runtime; install Bun or Node, or set CURSOR_API_BRIDGE_RUNTIME_BINARY before packaging." >&2; exit 1; }
 [ -x "$BRIDGE_RUNTIME_SOURCE" ] || { echo "Bridge runtime is not executable at $BRIDGE_RUNTIME_SOURCE" >&2; exit 1; }

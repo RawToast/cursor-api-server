@@ -108,7 +108,7 @@ CURSOR_CLIENT_VERSION="2.6.22"
 CURSOR_SDK_CLIENT_VERSION="sdk-1.0.13"
 ```
 
-Run the optional SDK local-agent bridge in a local Node or Bun environment:
+Run the optional SDK local-agent bridge in a local Bun or Node environment:
 
 ```bash
 npm run sdk:opencode-bridge
@@ -116,6 +116,9 @@ npm run sdk:opencode-bridge
 
 The bridge process also accepts `CURSOR_SDK_BRIDGE_RUN_TIMEOUT_MS`; the default is
 `180000`.
+
+Release packages prefer a bundled Bun runtime for the local SDK bridge and fall
+back to Node when Bun is unavailable.
 
 ## Cloudflare
 

@@ -85,14 +85,14 @@ actor CursorSDKBridgeServer {
     }
 
     private func runtimeExecutable() throws -> URL {
-        for resourceName in ["node", "bun"] {
+        for resourceName in ["bun", "node"] {
             if let bundled = Bundle.main.url(forResource: resourceName, withExtension: nil),
                FileManager.default.isExecutableFile(atPath: bundled.path) {
                 return bundled
             }
         }
 
-        for command in ["node", "bun"] {
+        for command in ["bun", "node"] {
             if let url = try systemExecutable(named: command) {
                 return url
             }

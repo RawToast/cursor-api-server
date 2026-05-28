@@ -6,6 +6,7 @@ API for Cursor ships as a signed macOS DMG and updates through Sparkle.
 
 - GitHub Actions builds the app bundle from `macos/CursorAPI`.
 - `package-app.sh --release` embeds Sparkle, the local SDK bridge, production metadata, and the appcast URL.
+- The package script bundles Bun by default for a smaller bridge runtime, with Node as the fallback.
 - `create-dmg.sh` creates a compressed DMG with the app and `/Applications` shortcut.
 - `notarize-dmg.sh` submits the DMG to Apple and staples the ticket.
 - `generate-appcast.sh` signs the update with Sparkle EdDSA and writes `appcast.xml`.
