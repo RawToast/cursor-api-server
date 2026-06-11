@@ -1055,7 +1055,7 @@ async function sha256Hex(value: string): Promise<string> {
 }
 
 async function cursorChecksum(env: Env, cursorIdentity: string): Promise<string> {
-  const machineId = await sha256Hex(`${env.ENCRYPTION_KEY || "composer-api"}:cursor-machine:${cursorIdentity}`);
+  const machineId = await sha256Hex(`composer-api:cursor-machine:${cursorIdentity}`);
   const timestamp = BigInt(Math.floor(Date.now() / 1_000_000));
   const bytes = new Uint8Array([
     Number((timestamp >> 40n) & 255n),

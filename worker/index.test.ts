@@ -1,305 +1,33 @@
 import { describe, expect, it } from "vitest";
-import { resetCursorSdkSessionCacheForTest } from "./cursor-sdk";
 import { handleRequest } from "./index";
-import { FakeD1, fakeCtx } from "./test-helpers";
+import { fakeCtx } from "./test-helpers";
 import type { Deps, Env } from "./types";
 
-interface MakeEnvOptions {
-  assetsFetch?: Fetcher["fetch"];
-  releases?: Record<string, { body: string; contentType?: string }>;
-  notaryWebhookToken?: string;
-  githubReleaseDispatchToken?: string;
-  githubReleaseRepository?: string;
-}
-
-function makeEnv(
-  db: FakeD1,
-  assetsFetchOrOptions: Fetcher["fetch"] | MakeEnvOptions = () => Promise.resolve(new Response("asset"))
-): Env {
-  const options: MakeEnvOptions =
-    typeof assetsFetchOrOptions === "function" ? { assetsFetch: assetsFetchOrOptions } : assetsFetchOrOptions;
-  const assetsFetch = options.assetsFetch ?? (() => Promise.resolve(new Response("asset")));
+function makeEnv(): Env {
   return {
-    DB: db as unknown as D1Database,
-    ASSETS: { fetch: assetsFetch } as unknown as Fetcher,
-    RELEASES: options.releases ? fakeR2(options.releases) : undefined,
-    ENCRYPTION_KEY: "test-encryption-secret-with-enough-entropy",
     CURSOR_API_BASE: "https://api.cursor.test",
     CURSOR_BACKEND_BASE_URL: "https://cursor-backend.test",
     CURSOR_CHAT_ENDPOINT: "/test-cursor-chat",
     CURSOR_CLIENT_VERSION: "2.6.22",
     CURSOR_LOCAL_AGENT_ENDPOINT: "/test-local-sdk",
-    CURSOR_SDK_CLIENT_VERSION: "sdk-test",
-    NOTARY_WEBHOOK_TOKEN: options.notaryWebhookToken,
-    GITHUB_RELEASE_DISPATCH_TOKEN: options.githubReleaseDispatchToken,
-    GITHUB_RELEASE_REPOSITORY: options.githubReleaseRepository
+    CURSOR_SDK_CLIENT_VERSION: "sdk-test"
   };
 }
 
-function fakeR2(objects: Record<string, { body: string; contentType?: string }>): R2Bucket {
-  return {
-    async get(key: string) {
-      const item = objects[key];
-      if (!item) return null;
-      const body = new TextEncoder().encode(item.body);
-      return {
-        body: new ReadableStream<Uint8Array>({
-          start(controller) {
-            controller.enqueue(body);
-            controller.close();
-          }
-        }),
-        httpEtag: `"${key}-etag"`,
-        httpMetadata: { contentType: item.contentType },
-        writeHttpMetadata(headers: Headers) {
-          if (item.contentType) headers.set("content-type", item.contentType);
-        }
-      } as unknown as R2ObjectBody;
-    }
-  } as unknown as R2Bucket;
-}
-
 describe("Worker", () => {
-  it("redirects the public download URL to the latest DMG release object", async () => {
-    const db = new FakeD1();
-    const env = makeEnv(db);
-    const { deps } = fakeDeps();
-
-    const response = await handleRequest(new Request("https://composer.test/download"), env, fakeCtx(), deps);
-
-    expect(response.status).toBe(302);
-    expect(response.headers.get("location")).toBe("https://composer.test/releases/API-for-Cursor-latest.dmg");
-  });
-
-  it("serves Sparkle appcast and DMG release objects from R2", async () => {
-    const db = new FakeD1();
-    const env = makeEnv(db, {
-      releases: {
-        "appcast.xml": { body: "<rss></rss>", contentType: "application/rss+xml" },
-        "releases/API-for-Cursor-0.1.0-1.dmg": { body: "dmg-bytes", contentType: "application/x-apple-diskimage" }
-      }
-    });
-    const { deps } = fakeDeps();
-
-    const appcast = await handleRequest(new Request("https://composer.test/appcast.xml"), env, fakeCtx(), deps);
-    expect(appcast.status).toBe(200);
-    expect(appcast.headers.get("content-type")).toContain("application/rss+xml");
-    expect(appcast.headers.get("cache-control")).toContain("max-age=60");
-    await expect(appcast.text()).resolves.toBe("<rss></rss>");
-
-    const dmg = await handleRequest(new Request("https://composer.test/releases/API-for-Cursor-0.1.0-1.dmg"), env, fakeCtx(), deps);
-    expect(dmg.status).toBe(200);
-    expect(dmg.headers.get("content-type")).toContain("application/x-apple-diskimage");
-    expect(dmg.headers.get("cache-control")).toContain("immutable");
-    expect(dmg.headers.get("content-disposition")).toContain("API-for-Cursor-0.1.0-1.dmg");
-    await expect(dmg.text()).resolves.toBe("dmg-bytes");
-  });
-
-  it("returns 404 for missing release objects without falling through to assets", async () => {
-    const db = new FakeD1();
-    const env = makeEnv(db, { releases: {} });
-    const { deps } = fakeDeps();
-
-    const response = await handleRequest(new Request("https://composer.test/releases/missing.dmg"), env, fakeCtx(), deps);
-
-    expect(response.status).toBe(404);
-  });
-
-  it("dispatches the release finalizer from an Apple notary webhook", async () => {
-    const db = new FakeD1();
-    const env = makeEnv(db, {
-      notaryWebhookToken: "webhook-secret",
-      githubReleaseDispatchToken: "github-token",
-      githubReleaseRepository: "standardagents/composer-api"
-    });
-    const dispatches: { url: string; init?: RequestInit }[] = [];
-    const { deps } = fakeDeps({
-      fetch: (input, init) => {
-        dispatches.push({ url: input.toString(), init });
-        return Promise.resolve(new Response(null, { status: 204 }));
-      }
-    });
-    const url =
-      "https://composer.test/api/notary/webhook/webhook-secret?version=0.1.3&build=4&run_id=123&artifact=pending&dmg=API.dmg&ref=refs/tags/v0.1.3";
-
-    const response = await handleRequest(
-      new Request(url, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ id: "notary-id", status: "Accepted" })
-      }),
-      env,
-      fakeCtx(),
-      deps
-    );
-
-    expect(response.status).toBe(200);
-    expect(dispatches).toHaveLength(1);
-    expect(dispatches[0].url).toBe("https://api.github.com/repos/standardagents/composer-api/dispatches");
-    expect(dispatches[0].init?.headers).toMatchObject({ authorization: "Bearer github-token" });
-    const body = JSON.parse(dispatches[0].init?.body as string);
-    expect(body.event_type).toBe("apple-notary-complete");
-    expect(body.client_payload).toMatchObject({
-      submissionId: "notary-id",
-      submissionStatus: "Accepted",
-      version: "0.1.3",
-      build: "4",
-      sourceRunId: "123",
-      artifactName: "pending",
-      dmgName: "API.dmg",
-      ref: "refs/tags/v0.1.3"
-    });
-  });
-
   it("allows OpenCode session headers in CORS preflight", async () => {
-    const db = new FakeD1();
-    const env = makeEnv(db);
+    const env = makeEnv();
     const { deps } = fakeDeps();
 
-    const response = await handleRequest(new Request("https://composer.test/opencode/v1/chat/completions", { method: "OPTIONS" }), env, fakeCtx(), deps);
+    const response = await handleRequest(new Request("https://composer.test/opencodev2/v1/chat/completions", { method: "OPTIONS" }), env, fakeCtx(), deps);
 
     expect(response.status).toBe(204);
     expect(response.headers.get("access-control-allow-headers")).toContain("x-session-affinity");
     expect(response.headers.get("access-control-allow-headers")).toContain("x-opencode-session-id");
   });
 
-  it("serves current stable Vite assets for stale hashed asset URLs", async () => {
-    const db = new FakeD1();
-    const requested: string[] = [];
-    const env = makeEnv(db, (input) => {
-      const url = new URL(input instanceof Request ? input.url : input.toString());
-      requested.push(url.pathname);
-      if (url.pathname === "/assets/index.css") {
-        return Promise.resolve(new Response("body { color: red; }", { headers: { "content-type": "text/css" } }));
-      }
-      return Promise.resolve(new Response(null, { status: 404 }));
-    });
-    const { deps } = fakeDeps();
-
-    const response = await handleRequest(
-      new Request("https://composer.test/assets/index-OLDHASH.css"),
-      env,
-      fakeCtx(),
-      deps
-    );
-
-    expect(response.status).toBe(200);
-    expect(response.headers.get("content-type")).toContain("text/css");
-    await expect(response.text()).resolves.toContain("color: red");
-    expect(requested).toContain("/assets/index.css");
-  });
-
-  it("signs up a Cursor API key and serves chat completions", async () => {
-    const db = new FakeD1();
-    const env = makeEnv(db);
-    const { deps } = fakeDeps();
-
-    const signup = await handleRequest(
-      new Request("https://composer.test/api/signup", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cursorApiKey: "cursor_key", name: "Ada", email: "ada@example.com", joinWaitlist: true })
-      }),
-      env,
-      fakeCtx(),
-      deps
-    );
-    expect(signup.status).toBe(200);
-    const signupBody = (await signup.json()) as { apiKey: string; endpoints: { chatCompletions: string } };
-    expect(signupBody.apiKey).toMatch(/^cmp_/);
-    expect(signupBody.endpoints.chatCompletions).toContain("/u/acct_");
-
-    const completion = await handleRequest(
-      new Request(signupBody.endpoints.chatCompletions, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${signupBody.apiKey}`
-        },
-        body: JSON.stringify({
-          model: "composer-2.5",
-          messages: [{ role: "user", content: "Say hello" }]
-        })
-      }),
-      env,
-      fakeCtx(),
-      deps
-    );
-    expect(completion.status).toBe(200);
-    await expect(completion.json()).resolves.toMatchObject({
-      object: "chat.completion",
-      choices: [{ message: { content: "Hello from Composer" } }]
-    });
-    expect([...db.requestLogs.values()].at(-1)).toMatchObject({
-      status: "completed",
-      completion_chars: "Hello from Composer".length
-    });
-  });
-
-  it("normalizes tool-call arguments through account-scoped Worker endpoints", async () => {
-    const db = new FakeD1();
-    const env = makeEnv(db);
-    const { deps } = fakeDeps();
-
-    const signup = await handleRequest(
-      new Request("https://composer.test/api/signup", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cursorApiKey: "cursor_key", name: "Ada", email: "ada@example.com" })
-      }),
-      env,
-      fakeCtx(),
-      deps
-    );
-    const signupBody = (await signup.json()) as { apiKey: string; endpoints: { chatCompletions: string } };
-
-    const response = await handleRequest(
-      new Request(signupBody.endpoints.chatCompletions, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${signupBody.apiKey}`
-        },
-        body: JSON.stringify({
-          model: "composer-2.5",
-          messages: [{ role: "user", content: "Schema transform" }],
-          tools: [
-            {
-              type: "function",
-              function: {
-                name: "glob",
-                parameters: {
-                  type: "object",
-                  additionalProperties: false,
-                  properties: { pattern: { type: "string" } },
-                  required: ["pattern"]
-                }
-              }
-            }
-          ]
-        })
-      }),
-      env,
-      fakeCtx(),
-      deps
-    );
-
-    expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({
-      choices: [
-        {
-          message: {
-            tool_calls: [{ type: "function", function: { name: "glob", arguments: "{\"pattern\":\"**/*.ts\"}" } }]
-          },
-          finish_reason: "tool_calls"
-        }
-      ]
-    });
-  });
-
-  it("serves bare /v1/chat/completions with a direct Cursor key and writes no request log", async () => {
-    const db = new FakeD1();
-    const env = makeEnv(db);
+  it("serves bare /v1/chat/completions with a direct Cursor key", async () => {
+    const env = makeEnv();
     const { deps, exchangeAuthHeaders } = fakeDeps();
 
     const completion = await handleRequest(
@@ -325,17 +53,13 @@ describe("Worker", () => {
     });
 
     // Direct mode must not persist anything to D1.
-    expect(db.requestLogs.size).toBe(0);
-    expect(db.accounts.size).toBe(0);
-    expect(db.apiKeys.size).toBe(0);
 
     // The caller's own key is forwarded only for Cursor API-key authorization.
     expect(exchangeAuthHeaders).toContain("Bearer cursor_direct_key");
   });
 
   it("keeps the Cursor machine identity stable across API key rotations for the same account", async () => {
-    const db = new FakeD1();
-    const env = makeEnv(db);
+    const env = makeEnv();
     const { deps, chatRequestHeaders } = fakeDeps();
 
     for (const key of ["cursor_direct_key_one", "cursor_direct_key_two"]) {
@@ -366,8 +90,7 @@ describe("Worker", () => {
   });
 
   it("streams SSE chat chunks in direct mode when stream is true", async () => {
-    const db = new FakeD1();
-    const env = makeEnv(db);
+    const env = makeEnv();
     const { deps, exchangeAuthHeaders } = fakeDeps();
 
     const response = await handleRequest(
@@ -400,13 +123,11 @@ describe("Worker", () => {
     expect(body).toContain('"total_usd"');
     expect(body).toContain("data: [DONE]");
 
-    expect(db.requestLogs.size).toBe(0);
     expect(exchangeAuthHeaders).toContain("Bearer cursor_direct_key");
   });
 
   it("streams Composer tool-call markers as OpenAI chat tool calls", async () => {
-    const db = new FakeD1();
-    const env = makeEnv(db);
+    const env = makeEnv();
     const { deps } = fakeDeps();
 
     const response = await handleRequest(
@@ -448,8 +169,7 @@ describe("Worker", () => {
   });
 
   it("buffers Composer tool-call markers as OpenAI chat tool calls", async () => {
-    const db = new FakeD1();
-    const env = makeEnv(db);
+    const env = makeEnv();
     const { deps } = fakeDeps();
 
     const response = await handleRequest(
@@ -485,8 +205,7 @@ describe("Worker", () => {
   });
 
   it("serves OpenCode chat through the SDK harness with tool calls", async () => {
-    const db = new FakeD1();
-    const env = makeEnv(db);
+    const env = makeEnv();
     const { deps, chatRequestBodies, sdkRequests } = fakeDeps();
 
     const response = await handleRequest(
@@ -531,7 +250,6 @@ describe("Worker", () => {
     expect(body).toContain('"finish_reason":"tool_calls"');
     expect(body).toContain('"choices":[]');
     expect(body).toContain('"usage"');
-    expect(db.requestLogs.size).toBe(0);
     expect(chatRequestBodies).toHaveLength(0);
     expect(sdkRequests.map((item) => `${item.method} ${item.path}`)).toEqual(["POST /test-local-sdk"]);
     expect(String(sdkRequests[0].body)).toContain("agent-");
@@ -541,52 +259,8 @@ describe("Worker", () => {
     expect(sdkRequests[0].headers.get("content-type")).toContain("application/connect+proto");
   });
 
-  it("keeps legacy /opencode chat on the Cursor chat endpoint", async () => {
-    const db = new FakeD1();
-    const env = makeEnv(db);
-    const { deps, chatRequestBodies, sdkRequests } = fakeDeps();
-
-    const response = await handleRequest(
-      new Request("https://composer.test/opencode/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: "Bearer cursor_direct_key_legacy",
-          "x-session-affinity": "legacy-session"
-        },
-        body: JSON.stringify({
-          model: "composer-2.5",
-          messages: [{ role: "user", content: "List files" }],
-          tools: [{ type: "function", function: { name: "glob" } }]
-        })
-      }),
-      env,
-      fakeCtx(),
-      deps
-    );
-
-    expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({
-      choices: [
-        {
-          message: {
-            content: "Checking the workspace.\n",
-            tool_calls: [{ type: "function", function: { name: "glob", arguments: "{\"glob_pattern\":\"*\"}" } }]
-          },
-          finish_reason: "tool_calls"
-        }
-      ]
-    });
-    expect(sdkRequests).toHaveLength(0);
-    expect(chatRequestBodies).toHaveLength(1);
-    expect(chatRequestBodies[0]).toContain("This request is already in Agent mode");
-    expect(chatRequestBodies[0]).toContain("Switched to agent mode successfully.");
-    expect(chatRequestBodies[0]).not.toContain("SDK-compatible OpenCode harness");
-  });
-
   it("keeps OpenCode SDK agents stable for a session-affinity header", async () => {
-    const db = new FakeD1();
-    const env = makeEnv(db);
+    const env = makeEnv();
     const { deps, chatRequestBodies, sdkRequests } = fakeDeps();
 
     for (const affinity of ["session-one", "session-one", "session-two"]) {
@@ -623,8 +297,7 @@ describe("Worker", () => {
   });
 
   it("streams local SDK output from one run", async () => {
-    const db = new FakeD1();
-    const env = makeEnv(db);
+    const env = makeEnv();
     const { deps, sdkRequests } = fakeDeps();
 
     const response = await handleRequest(
@@ -653,8 +326,7 @@ describe("Worker", () => {
   });
 
   it("retries schema-invalid SDK tool calls even when no local tool was required", async () => {
-    const db = new FakeD1();
-    const env = makeEnv(db);
+    const env = makeEnv();
     const { deps, sdkRequests } = fakeDeps();
 
     const response = await handleRequest(
@@ -703,8 +375,7 @@ describe("Worker", () => {
   });
 
   it("can route OpenCode SDK runs through a standard streaming bridge", async () => {
-    const db = new FakeD1();
-    const env = { ...makeEnv(db), CURSOR_SDK_BRIDGE_URL: "https://bridge.test/sdk" };
+    const env = { ...makeEnv(), CURSOR_SDK_BRIDGE_URL: "https://bridge.test/sdk" };
     const { deps, sdkRequests } = fakeDeps();
 
     const response = await handleRequest(
@@ -772,10 +443,9 @@ describe("Worker", () => {
   });
 
   it("times out stalled standard SDK bridge requests", async () => {
-    const db = new FakeD1();
     const base = fakeDeps();
     const env = {
-      ...makeEnv(db),
+      ...makeEnv(),
       CURSOR_SDK_BRIDGE_URL: "https://bridge-timeout.test/sdk",
       CURSOR_SDK_BRIDGE_TIMEOUT_MS: "5"
     };
@@ -818,113 +488,8 @@ describe("Worker", () => {
     });
   });
 
-  it("prefers the shared container bridge when the Durable Object binding exists", async () => {
-    const db = new FakeD1();
-    const bridgeRequests: Array<{ path: string; headers: Headers; body: Record<string, unknown> }> = [];
-    const env = {
-      ...makeEnv(db),
-      CURSOR_SDK_BRIDGE_TOKEN: "bridge-token",
-      CURSOR_SDK_BRIDGE_URL: "https://bridge.test/sdk",
-      CURSOR_SDK_BRIDGE_CONTAINER: fakeBridgeNamespace(async (input, init) => {
-        const url = new URL(String(input));
-        const headers = new Headers(init?.headers);
-        const body = JSON.parse(String(init?.body || "{}")) as Record<string, unknown>;
-        bridgeRequests.push({ path: url.pathname, headers, body });
-        return localSdkBridgeJsonResponse(sdkRunKind(typeof body.prompt === "string" ? body.prompt : ""));
-      })
-    };
-    const { deps, sdkRequests } = fakeDeps();
-
-    const response = await handleRequest(
-      new Request("https://composer.test/opencodev2/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: "Bearer cursor_direct_key_container_bridge",
-          "x-session-affinity": "container-bridge-session"
-        },
-        body: JSON.stringify({
-          model: "composer-2.5",
-          messages: [
-            { role: "system", content: "Environment:\n  Working directory: /tmp/project" },
-            { role: "user", content: "Say hello" }
-          ]
-        })
-      }),
-      env,
-      fakeCtx(),
-      deps
-    );
-
-    expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({
-      choices: [{ message: { content: "Hello from SDK" }, finish_reason: "stop" }]
-    });
-    expect(sdkRequests).toHaveLength(0);
-    expect(bridgeRequests).toHaveLength(1);
-    expect(bridgeRequests[0].path).toBe("/sdk");
-    expect(bridgeRequests[0].headers.get("authorization")).toBe("Bearer bridge-token");
-    expect(bridgeRequests[0].body.apiKey).toBe("cursor_direct_key_container_bridge");
-    expect(bridgeRequests[0].body.model).toBe("composer-2.5");
-    expect(bridgeRequests[0].body.workingDirectory).toBe("/tmp/project");
-  });
-
-  it("persists OpenCode SDK sessions in D1 across isolate cache resets", async () => {
-    const db = new FakeD1();
-    const env = makeEnv(db);
-    const firstDeps = fakeDeps();
-
-    const first = await handleRequest(
-      new Request("https://composer.test/opencodev2/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: "Bearer cursor_direct_key_persisted",
-          "x-session-affinity": "persisted-session"
-        },
-        body: JSON.stringify({
-          model: "composer-2.5",
-          messages: [{ role: "user", content: "Say hello" }]
-        })
-      }),
-      env,
-      fakeCtx(),
-      firstDeps.deps
-    );
-    expect(first.status).toBe(200);
-    await first.json();
-    expect(db.sdkSessions.size).toBe(1);
-
-    resetCursorSdkSessionCacheForTest();
-    const secondDeps = fakeDeps();
-    const second = await handleRequest(
-      new Request("https://composer.test/opencodev2/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: "Bearer cursor_direct_key_persisted",
-          "x-session-affinity": "persisted-session"
-        },
-        body: JSON.stringify({
-          model: "composer-2.5",
-          messages: [{ role: "user", content: "Say hello again" }]
-        })
-      }),
-      env,
-      fakeCtx(),
-      secondDeps.deps
-    );
-
-    expect(second.status).toBe(200);
-    await second.json();
-    expect(secondDeps.sdkRequests.map((item) => `${item.method} ${item.path}`)).toEqual(["POST /test-local-sdk"]);
-    const persistedAgent = [...db.sdkSessions.values()][0]?.agent_id;
-    expect(String(secondDeps.sdkRequests[0].body)).toContain(persistedAgent);
-  });
-
   it("feeds OpenCode tool results back to the SDK run as SDK-shaped tool output", async () => {
-    const db = new FakeD1();
-    const env = makeEnv(db);
+    const env = makeEnv();
     const { deps, sdkRequests } = fakeDeps();
 
     const response = await handleRequest(
@@ -976,8 +541,7 @@ describe("Worker", () => {
   });
 
   it("maps SDK shell calls to OpenCode bash schema including required defaults", async () => {
-    const db = new FakeD1();
-    const env = makeEnv(db);
+    const env = makeEnv();
     const { deps } = fakeDeps();
 
     const response = await handleRequest(
@@ -1025,8 +589,7 @@ describe("Worker", () => {
   });
 
   it("does not return completed SDK tool-result updates as fresh OpenCode tool calls", async () => {
-    const db = new FakeD1();
-    const env = makeEnv(db);
+    const env = makeEnv();
     const { deps, chatRequestBodies, sdkRequests } = fakeDeps();
 
     const response = await handleRequest(
@@ -1069,20 +632,11 @@ describe("Worker", () => {
   });
 
   it("labels the OpenCode model without changing the standard model list", async () => {
-    const db = new FakeD1();
-    const env = makeEnv(db);
+    const env = makeEnv();
     const { deps } = fakeDeps();
 
     const standard = await handleRequest(
       new Request("https://composer.test/v1/models", {
-        headers: { Authorization: "Bearer cursor_direct_key" }
-      }),
-      env,
-      fakeCtx(),
-      deps
-    );
-    const opencodeLegacy = await handleRequest(
-      new Request("https://composer.test/opencode/v1/models", {
         headers: { Authorization: "Bearer cursor_direct_key" }
       }),
       env,
@@ -1099,23 +653,18 @@ describe("Worker", () => {
     );
 
     expect(standard.status).toBe(200);
-    expect(opencodeLegacy.status).toBe(200);
     expect(opencodeSdk.status).toBe(200);
     const standardBody = (await standard.json()) as { data: Array<{ id: string; name: string; cost?: { input: number; output: number } }> };
-    const opencodeLegacyBody = (await opencodeLegacy.json()) as { data: Array<{ id: string; name: string; cost?: { input: number; output: number } }> };
     const opencodeSdkBody = (await opencodeSdk.json()) as { data: Array<{ id: string; name: string; cost?: { input: number; output: number } }> };
     expect(standardBody.data.find((model) => model.id === "composer-2.5")?.name).toBe("Cursor Composer 2.5");
     expect(standardBody.data.map((model) => model.id)).not.toContain("composer-2.5-sdk");
-    expect(opencodeLegacyBody.data.find((model) => model.id === "composer-2.5")?.name).toBe("Composer 2.5");
-    expect(opencodeLegacyBody.data.map((model) => model.id)).not.toContain("composer-2.5-sdk");
     expect(opencodeSdkBody.data.find((model) => model.id === "composer-2.5")?.name).toBe("Composer 2.5");
     expect(opencodeSdkBody.data.find((model) => model.id === "composer-2.5-sdk")?.name).toBe("Composer 2.5 SDK Harness");
     expect(opencodeSdkBody.data.find((model) => model.id === "composer-2.5")?.cost).toEqual({ input: 0.5, output: 2.5 });
   });
 
   it("streams SSE response events in direct mode for /v1/responses", async () => {
-    const db = new FakeD1();
-    const env = makeEnv(db);
+    const env = makeEnv();
     const { deps } = fakeDeps();
 
     const response = await handleRequest(
@@ -1139,12 +688,10 @@ describe("Worker", () => {
     expect(body).toContain("event: response.output_text.delta");
     expect(body).toContain("event: response.completed");
     expect(body).toContain("Hello from Composer");
-    expect(db.requestLogs.size).toBe(0);
   });
 
   it("returns a buffered JSON response for /v1/responses when stream is absent", async () => {
-    const db = new FakeD1();
-    const env = makeEnv(db);
+    const env = makeEnv();
     const { deps } = fakeDeps();
 
     const response = await handleRequest(
@@ -1170,8 +717,7 @@ describe("Worker", () => {
   });
 
   it("uses the SDK bridge for standard Responses when configured", async () => {
-    const db = new FakeD1();
-    const env = { ...makeEnv(db), CURSOR_SDK_BRIDGE_URL: "https://bridge.test/sdk" };
+    const env = { ...makeEnv(), CURSOR_SDK_BRIDGE_URL: "https://bridge.test/sdk" };
     const { deps, chatRequestBodies, sdkRequests } = fakeDeps();
 
     const response = await handleRequest(
@@ -1203,8 +749,7 @@ describe("Worker", () => {
   });
 
   it("uses the SDK bridge for standard Chat Completions when configured", async () => {
-    const db = new FakeD1();
-    const env = { ...makeEnv(db), CURSOR_SDK_BRIDGE_URL: "https://bridge.test/sdk" };
+    const env = { ...makeEnv(), CURSOR_SDK_BRIDGE_URL: "https://bridge.test/sdk" };
     const { deps, chatRequestBodies, sdkRequests } = fakeDeps();
 
     const response = await handleRequest(
@@ -1237,8 +782,7 @@ describe("Worker", () => {
   });
 
   it("reuses the SDK session for standard Responses continuations", async () => {
-    const db = new FakeD1();
-    const env = { ...makeEnv(db), CURSOR_SDK_BRIDGE_URL: "https://bridge.test/sdk" };
+    const env = { ...makeEnv(), CURSOR_SDK_BRIDGE_URL: "https://bridge.test/sdk" };
     const { deps, sdkRequests } = fakeDeps();
 
     const first = await handleRequest(
@@ -1277,8 +821,7 @@ describe("Worker", () => {
   });
 
   it("stores Responses for retrieval and input item listing", async () => {
-    const db = new FakeD1();
-    const env = makeEnv(db);
+    const env = makeEnv();
     const { deps } = fakeDeps();
 
     const created = await handleRequest(
@@ -1326,8 +869,7 @@ describe("Worker", () => {
   });
 
   it("continues Responses with previous_response_id context", async () => {
-    const db = new FakeD1();
-    const env = makeEnv(db);
+    const env = makeEnv();
     const { deps, chatRequestBodies } = fakeDeps();
 
     const first = await handleRequest(
@@ -1367,8 +909,7 @@ describe("Worker", () => {
   });
 
   it("continues store false Responses without making them retrievable", async () => {
-    const db = new FakeD1();
-    const env = makeEnv(db);
+    const env = makeEnv();
     const { deps } = fakeDeps();
 
     const first = await handleRequest(
@@ -1416,8 +957,7 @@ describe("Worker", () => {
   });
 
   it("rejects missing or deleted previous Responses", async () => {
-    const db = new FakeD1();
-    const env = makeEnv(db);
+    const env = makeEnv();
     const { deps } = fakeDeps();
 
     const missing = await handleRequest(
@@ -1478,8 +1018,7 @@ describe("Worker", () => {
   });
 
   it("returns Responses function calls when tools are provided", async () => {
-    const db = new FakeD1();
-    const env = makeEnv(db);
+    const env = makeEnv();
     const { deps } = fakeDeps();
 
     const response = await handleRequest(
@@ -1517,8 +1056,7 @@ describe("Worker", () => {
   });
 
   it("uses the SDK bridge for standard Chat Completions when tools are provided", async () => {
-    const db = new FakeD1();
-    const env = { ...makeEnv(db), CURSOR_SDK_BRIDGE_URL: "https://bridge.test/sdk" };
+    const env = { ...makeEnv(), CURSOR_SDK_BRIDGE_URL: "https://bridge.test/sdk" };
     const { deps, chatRequestBodies, sdkRequests } = fakeDeps();
 
     const response = await handleRequest(
@@ -1562,8 +1100,7 @@ describe("Worker", () => {
   });
 
   it("streams Responses function_call events when tools are provided", async () => {
-    const db = new FakeD1();
-    const env = makeEnv(db);
+    const env = makeEnv();
     const { deps } = fakeDeps();
 
     const response = await handleRequest(
@@ -1599,55 +1136,8 @@ describe("Worker", () => {
     expect(body).toContain("{\\\"pattern\\\":\\\"**/*.ts\\\"}");
   });
 
-  it("streams SSE chat chunks in legacy cmp_ proxy mode and still writes a request log", async () => {
-    const db = new FakeD1();
-    const env = makeEnv(db);
-    const { deps } = fakeDeps();
-
-    const signup = await handleRequest(
-      new Request("https://composer.test/api/signup", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cursorApiKey: "cursor_key" })
-      }),
-      env,
-      fakeCtx(),
-      deps
-    );
-    const signupBody = (await signup.json()) as { apiKey: string; endpoints: { chatCompletions: string } };
-
-    const response = await handleRequest(
-      new Request(signupBody.endpoints.chatCompletions, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${signupBody.apiKey}`
-        },
-        body: JSON.stringify({
-          model: "composer-2.5",
-          stream: true,
-          messages: [{ role: "user", content: "Say hello" }]
-        })
-      }),
-      env,
-      fakeCtx(),
-      deps
-    );
-
-    expect(response.status).toBe(200);
-    expect(response.headers.get("content-type")).toContain("text/event-stream");
-    const body = await response.text();
-    expect(body).toContain('"object":"chat.completion.chunk"');
-    expect(body).toContain('"content":"Hello from Composer"');
-    expect(body).toContain("data: [DONE]");
-
-    // Proxy mode still records a request log; streaming completes it asynchronously.
-    expect(db.requestLogs.size).toBe(1);
-  });
-
   it("streams Cursor errors as SSE errors instead of assistant text", async () => {
-    const db = new FakeD1();
-    const env = makeEnv(db);
+    const env = makeEnv();
     const { deps } = fakeDeps();
 
     const response = await handleRequest(
@@ -1676,8 +1166,7 @@ describe("Worker", () => {
   });
 
   it("requires a bearer token for /v1/models", async () => {
-    const db = new FakeD1();
-    const env = makeEnv(db);
+    const env = makeEnv();
     const { deps } = fakeDeps();
 
     const noAuth = await handleRequest(
@@ -1711,28 +1200,6 @@ describe("Worker", () => {
     expect(body.data.map((model) => model.id)).not.toContain("gpt-5.5");
   });
 
-  it("rejects an unknown cmp_ token without forwarding it to Cursor", async () => {
-    const db = new FakeD1();
-    const env = makeEnv(db);
-    const { deps, exchangeAuthHeaders } = fakeDeps();
-
-    const completion = await handleRequest(
-      new Request("https://composer.test/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: "Bearer cmp_not_a_real_key"
-        },
-        body: JSON.stringify({ model: "composer-2.5", messages: [{ role: "user", content: "Hi" }] })
-      }),
-      env,
-      fakeCtx(),
-      deps
-    );
-    expect(completion.status).toBe(401);
-    // An invalid cmp_ token is never forwarded to Cursor as a Cursor key.
-    expect(exchangeAuthHeaders).toHaveLength(0);
-  });
 });
 
 function fakeDeps(overrides: Partial<Deps> = {}): {
@@ -1868,13 +1335,6 @@ function fakeDeps(overrides: Partial<Deps> = {}): {
   };
   Object.assign(deps, overrides);
   return { deps, exchangeAuthHeaders, chatAuthHeaders, chatRequestHeaders, chatRequestBodies, sdkRequests };
-}
-
-function fakeBridgeNamespace(handler: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>): DurableObjectNamespace {
-  return {
-    idFromName: (name: string) => ({ name }) as unknown as DurableObjectId,
-    get: () => ({ fetch: handler }) as unknown as DurableObjectStub
-  } as unknown as DurableObjectNamespace;
 }
 
 function cursorError(title: string, detail: string): Uint8Array {

@@ -10,8 +10,8 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "noEmit": true,
-    "lib": ["ES2022", "DOM", "DOM.Iterable", "WebWorker"],
-    "types": ["@cloudflare/workers-types", "vitest/globals"]
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["bun", "vitest/globals"]
   },
-  "include": ["src", "worker", "vite.config.ts", "vitest.config.ts"]
+  "include": ["worker", "scripts", "server.ts", "vitest.config.ts"]
 }

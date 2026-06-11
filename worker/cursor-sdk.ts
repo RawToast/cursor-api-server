@@ -114,13 +114,12 @@ export async function createCursorSdkCompletion(
   const now = deps.now();
   pruneSessions(now.getTime());
   const sessionIdentity = await sdkSessionIdentity(apiKey, input.sessionKey || "default", input.sessionOwnerKey);
-  const session = sdkSessions.get(sessionIdentity.id) ?? (await readPersistedSdkSession(env, sessionIdentity.id, now.getTime()));
+  const session = sdkSessions.get(sessionIdentity.id);
   const agentId = session?.agentId || newLocalSdkAgentId(deps.randomUUID());
   const runId = newLocalSdkRunId(deps.randomUUID());
   const updatedAt = deps.now();
 
   sdkSessions.set(sessionIdentity.id, { agentId, updatedAt: updatedAt.getTime() });
-  await savePersistedSdkSession(env, sessionIdentity, agentId, updatedAt);
 
   const runInput = {
     agentId,
@@ -518,14 +517,9 @@ async function cursorLocalSdkBridgeJson(
     workingDirectory: sdkWorkingDirectory(input.workingDirectory),
     tools: bridgeClientTools(input.clientTools)
   });
-  const bridgeBinding = env.CURSOR_SDK_BRIDGE_CONTAINER;
   const bridgeUrl = env.CURSOR_SDK_BRIDGE_URL?.trim();
   const response = await withCursorLocalSdkBridgeTimeout(env, (signal) =>
-    bridgeBinding
-      ? cursorLocalSdkContainerBridgeJson(env, bridgeBinding, body, signal)
-      : bridgeUrl
-        ? cursorLocalSdkUrlBridgeJson(env, deps, bridgeUrl, body, signal)
-        : Promise.resolve(undefined)
+    bridgeUrl ? cursorLocalSdkUrlBridgeJson(env, deps, bridgeUrl, body, signal) : Promise.resolve(undefined)
   );
   if (!response) throw new HttpError("Cursor SDK bridge is not configured", 500, "cursor_sdk_bridge_missing");
   return parseCursorLocalSdkBridgeJsonResponse(response);
@@ -533,17 +527,6 @@ async function cursorLocalSdkBridgeJson(
 
 async function cursorLocalSdkUrlBridgeJson(env: Env, deps: Deps, bridgeUrl: string, body: string, signal?: AbortSignal): Promise<Response> {
   return deps.fetch(bridgeUrl, {
-    method: "POST",
-    headers: cursorLocalSdkBridgeHeaders(env),
-    body,
-    signal
-  });
-}
-
-async function cursorLocalSdkContainerBridgeJson(env: Env, bridgeBinding: DurableObjectNamespace, body: string, signal?: AbortSignal): Promise<Response> {
-  const bridgeId = bridgeBinding.idFromName("shared");
-  const bridge = bridgeBinding.get(bridgeId);
-  return bridge.fetch("http://cursor-sdk-bridge.local/sdk", {
     method: "POST",
     headers: cursorLocalSdkBridgeHeaders(env),
     body,
@@ -621,7 +604,7 @@ function cursorToolCallFromJson(value: unknown): CursorToolCall[] {
 }
 
 function hasCursorSdkBridge(env: Env): boolean {
-  return Boolean(env.CURSOR_SDK_BRIDGE_CONTAINER || env.CURSOR_SDK_BRIDGE_URL?.trim());
+  return Boolean(env.CURSOR_SDK_BRIDGE_URL?.trim());
 }
 
 function bridgeClientTools(tools: ClientToolSpec[] | undefined): ClientToolSpec[] {
@@ -1040,55 +1023,6 @@ function newLocalSdkAgentId(uuid: string): string {
 
 function newLocalSdkRunId(uuid: string): string {
   return uuid.startsWith("run-") ? uuid : `run-${uuid}`;
-}
-
-async function readPersistedSdkSession(env: Env, id: string, now: number): Promise<CursorSdkSession | undefined> {
-  try {
-    const row = await env.DB.prepare(`SELECT agent_id, updated_at FROM sdk_sessions WHERE id = ? LIMIT 1`)
-      .bind(id)
-      .first<{ agent_id: string; updated_at: string }>();
-    if (!row?.agent_id) return undefined;
-    const updatedAt = Date.parse(row.updated_at);
-    if (!Number.isFinite(updatedAt) || updatedAt + SDK_SESSION_TTL_MS < now) {
-      await deletePersistedSdkSession(env, id);
-      return undefined;
-    }
-    const session = { agentId: row.agent_id, updatedAt };
-    sdkSessions.set(id, session);
-    return session;
-  } catch {
-    return undefined;
-  }
-}
-
-async function savePersistedSdkSession(
-  env: Env,
-  identity: { id: string; ownerHash: string; sessionHash: string },
-  agentId: string,
-  updatedAt: Date
-): Promise<void> {
-  try {
-    const timestamp = updatedAt.toISOString();
-    await env.DB.prepare(
-      `INSERT INTO sdk_sessions (id, owner_hash, session_hash, agent_id, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET
-         agent_id = excluded.agent_id,
-         updated_at = excluded.updated_at`
-    )
-      .bind(identity.id, identity.ownerHash, identity.sessionHash, agentId, timestamp, timestamp)
-      .run();
-  } catch {
-    // D1 persistence is best-effort so local development without migrations still works.
-  }
-}
-
-async function deletePersistedSdkSession(env: Env, id: string): Promise<void> {
-  try {
-    await env.DB.prepare(`DELETE FROM sdk_sessions WHERE id = ?`).bind(id).run();
-  } catch {
-    // Ignore missing table or transient persistence failures.
-  }
 }
 
 function protoMessage(parts: Uint8Array[]): Uint8Array {
