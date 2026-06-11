@@ -1,31 +1,32 @@
 const JSON_HEADERS = {
-  "content-type": "application/json; charset=utf-8"
-};
+  "content-type": "application/json; charset=utf-8",
+}
 
 const CORS_HEADERS = {
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "GET,POST,OPTIONS",
-  "access-control-allow-headers": "authorization,content-type,x-api-key,idempotency-key,x-session-affinity,x-opencode-session-id,x-opencode-session",
-  "access-control-max-age": "86400"
-};
+  "access-control-allow-headers":
+    "authorization,content-type,x-api-key,idempotency-key,x-session-affinity,x-opencode-session-id,x-opencode-session",
+  "access-control-max-age": "86400",
+}
 
 export function withCors(response: Response): Response {
-  const headers = new Headers(response.headers);
+  const headers = new Headers(response.headers)
   for (const [key, value] of Object.entries(CORS_HEADERS)) {
-    headers.set(key, value);
+    headers.set(key, value)
   }
   return new Response(response.body, {
     status: response.status,
     statusText: response.statusText,
-    headers
-  });
+    headers,
+  })
 }
 
 export function optionsResponse(): Response {
   return new Response(null, {
     status: 204,
-    headers: CORS_HEADERS
-  });
+    headers: CORS_HEADERS,
+  })
 }
 
 export function json(data: unknown, init: ResponseInit = {}): Response {
@@ -34,70 +35,75 @@ export function json(data: unknown, init: ResponseInit = {}): Response {
       ...init,
       headers: {
         ...JSON_HEADERS,
-        ...init.headers
-      }
-    })
-  );
+        ...init.headers,
+      },
+    }),
+  )
 }
 
-export function openAiError(message: string, status = 400, code = "invalid_request_error", param?: string): Response {
+export function openAiError(
+  message: string,
+  status = 400,
+  code = "invalid_request_error",
+  param?: string,
+): Response {
   return json(
     {
       error: {
         message,
         type: code,
         param: param ?? null,
-        code
-      }
+        code,
+      },
     },
-    { status }
-  );
+    { status },
+  )
 }
 
 export function unauthorized(message = "Missing or invalid API key"): Response {
-  return openAiError(message, 401, "unauthorized");
+  return openAiError(message, 401, "unauthorized")
 }
 
 export function notFound(): Response {
-  return openAiError("Not found", 404, "not_found");
+  return openAiError("Not found", 404, "not_found")
 }
 
 export function bearerToken(request: Request): string | undefined {
-  const authorization = request.headers.get("authorization") || "";
-  const match = /^Bearer\s+(.+)$/i.exec(authorization.trim());
-  if (match) return match[1].trim();
-  const apiKey = request.headers.get("x-api-key");
-  return apiKey?.trim() || undefined;
+  const authorization = request.headers.get("authorization") || ""
+  const match = /^Bearer\s+(.+)$/i.exec(authorization.trim())
+  if (match) return match[1].trim()
+  const apiKey = request.headers.get("x-api-key")
+  return apiKey?.trim() || undefined
 }
 
 export function parseJsonBody<T = unknown>(request: Request): Promise<T> {
-  const contentType = request.headers.get("content-type") || "";
+  const contentType = request.headers.get("content-type") || ""
   if (contentType && !contentType.toLowerCase().includes("application/json")) {
-    throw new HttpError("Content-Type must be application/json", 415);
+    throw new HttpError("Content-Type must be application/json", 415)
   }
-  return request.json() as Promise<T>;
+  return request.json() as Promise<T>
 }
 
 export class HttpError extends Error {
-  readonly status: number;
-  readonly code: string;
-  readonly param?: string;
+  readonly status: number
+  readonly code: string
+  readonly param?: string
 
   constructor(message: string, status = 400, code = "invalid_request_error", param?: string) {
-    super(message);
-    this.name = "HttpError";
-    this.status = status;
-    this.code = code;
-    this.param = param;
+    super(message)
+    this.name = "HttpError"
+    this.status = status
+    this.code = code
+    this.param = param
   }
 }
 
 export function errorResponse(error: unknown): Response {
   if (error instanceof HttpError) {
-    return openAiError(error.message, error.status, error.code, error.param);
+    return openAiError(error.message, error.status, error.code, error.param)
   }
-  const message = error instanceof Error ? error.message : "Unexpected error";
-  return openAiError(message, 500, "internal_error");
+  const message = error instanceof Error ? error.message : "Unexpected error"
+  return openAiError(message, 500, "internal_error")
 }
 
 export function sseResponse(readable: ReadableStream<Uint8Array>): Response {
@@ -107,8 +113,8 @@ export function sseResponse(readable: ReadableStream<Uint8Array>): Response {
         "content-type": "text/event-stream; charset=utf-8",
         "cache-control": "no-cache, no-transform",
         connection: "keep-alive",
-        "x-accel-buffering": "no"
-      }
-    })
-  );
+        "x-accel-buffering": "no",
+      },
+    }),
+  )
 }

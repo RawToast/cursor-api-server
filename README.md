@@ -21,17 +21,17 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 ```
 
 ```ts
-import OpenAI from "openai";
+import OpenAI from "openai"
 
 const client = new OpenAI({
   apiKey: process.env.CURSOR_API_KEY,
-  baseURL: "http://127.0.0.1:8787/v1"
-});
+  baseURL: "http://127.0.0.1:8787/v1",
+})
 
 const completion = await client.chat.completions.create({
   model: "composer-2.5",
-  messages: [{ role: "user", content: "Write a TypeScript debounce." }]
-});
+  messages: [{ role: "user", content: "Write a TypeScript debounce." }],
+})
 ```
 
 ## Endpoints
@@ -48,15 +48,15 @@ Response state and SDK sessions are held in memory; restarting the server invali
 
 All settings are optional environment variables (Bun auto-loads `.env`; see `.env.example`):
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `PORT` / `HOST` | `8787` / `127.0.0.1` | API listen address |
-| `CURSOR_API_BASE` | `https://api.cursor.com` | Cursor public API |
-| `CURSOR_SDK_BRIDGE_PORT` | `8792` | SDK bridge subprocess port |
-| `CURSOR_SDK_BRIDGE_RUNTIME` | auto-detected `node` | Binary used to run the bridge subprocess |
-| `CURSOR_SDK_BRIDGE_URL` | unset | Use an external bridge instead of starting one (pair with `CURSOR_SDK_BRIDGE_TOKEN`) |
-| `CURSOR_SDK_BRIDGE_TIMEOUT_MS` | `180000` | Bridge request timeout |
-| `CURSOR_CLIENT_VERSION` / `CURSOR_SDK_CLIENT_VERSION` | `2.6.22` / `sdk-1.0.13` | Version strings sent to Cursor |
+| Variable                                              | Default                  | Purpose                                                                              |
+| ----------------------------------------------------- | ------------------------ | ------------------------------------------------------------------------------------ |
+| `PORT` / `HOST`                                       | `8787` / `127.0.0.1`     | API listen address                                                                   |
+| `CURSOR_API_BASE`                                     | `https://api.cursor.com` | Cursor public API                                                                    |
+| `CURSOR_SDK_BRIDGE_PORT`                              | `8792`                   | SDK bridge subprocess port                                                           |
+| `CURSOR_SDK_BRIDGE_RUNTIME`                           | auto-detected `node`     | Binary used to run the bridge subprocess                                             |
+| `CURSOR_SDK_BRIDGE_URL`                               | unset                    | Use an external bridge instead of starting one (pair with `CURSOR_SDK_BRIDGE_TOKEN`) |
+| `CURSOR_SDK_BRIDGE_TIMEOUT_MS`                        | `180000`                 | Bridge request timeout                                                               |
+| `CURSOR_CLIENT_VERSION` / `CURSOR_SDK_CLIENT_VERSION` | `2.6.22` / `sdk-1.0.13`  | Version strings sent to Cursor                                                       |
 
 ### Legacy direct-backend fallback
 

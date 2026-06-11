@@ -2,39 +2,41 @@
   "name": "api-for-cursor",
   "version": "0.1.0",
   "private": false,
-  "type": "module",
   "description": "Local OpenAI-compatible Chat Completions and Responses API for Cursor Composer.",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/standardagents/composer-api.git"
-  },
+  "keywords": [
+    "bun",
+    "chat-completions",
+    "composer",
+    "cursor",
+    "openai",
+    "responses-api"
+  ],
   "homepage": "https://github.com/standardagents/composer-api#readme",
   "bugs": {
     "url": "https://github.com/standardagents/composer-api/issues"
   },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/standardagents/composer-api.git"
+  },
+  "type": "module",
   "scripts": {
     "server": "bun run server.ts",
     "start": "bun run server.ts",
-    "sdk:opencode-bridge": "node scripts/cursor-sdk-local-agent-bridge.mjs",
+    "sdk:opencode-bridge": "bun scripts/cursor-sdk-local-agent-bridge.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "format": "oxfmt"
   },
-  "keywords": [
-    "cursor",
-    "composer",
-    "openai",
-    "chat-completions",
-    "responses-api",
-    "bun"
-  ],
-  "license": "MIT",
   "dependencies": {
-    "@cursor/sdk": "^1.0.13"
+    "@cursor/sdk": "1.0.18"
   },
   "devDependencies": {
-    "@types/bun": "^1.2.0",
-    "typescript": "^5.9.3",
-    "vitest": "^4.0.15"
+    "@types/bun": "1.2.0",
+    "oxfmt": "0.53.0",
+    "typescript": "6.0.3",
+    "vitest": "4.1.8"
   }
 }
