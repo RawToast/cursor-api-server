@@ -60,11 +60,12 @@ async function startBridge(): Promise<BridgeSetup> {
   return { bridgeUrl, close: () => void bridgeServer.close(), mode: "in-process SDK bridge" }
 }
 
+type SpawnedProcess = ReturnType<typeof Bun.spawn>
 function spawnBridgeSubprocess(runtime: string): () => void {
   let stopped = false
   let child = Bun.spawn([runtime, bridgeScript], { stdout: "inherit", stderr: "inherit" })
 
-  const superviseExit = (proc: ReturnType<typeof Bun.spawn>) => {
+  const superviseExit = (proc: SpawnedProcess) => {
     void proc.exited.then((code) => {
       if (stopped) return
       console.error(`SDK bridge exited with code ${code}; restarting in 1s.`)

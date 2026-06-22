@@ -1,5 +1,5 @@
 [install]
-exact=true
+exact = true
 linker = "isolated"
 minimumReleaseAge = 259200 # 3 days
 minimumReleaseAgeExcludes = []
