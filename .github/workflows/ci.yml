@@ -19,7 +19,7 @@ jobs:
         run: bun ci
 
       - name: Check
-        run: bun compile
+        run: bun check
 
       - name: Test
         run: bun run test
