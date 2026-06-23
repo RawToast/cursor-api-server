@@ -1621,10 +1621,6 @@ function localSdkBridgeJsonResponse(kind: ReturnType<typeof sdkRunKind>): Respon
   })
 }
 
-function decodeBase64ForTest(value: string): string {
-  return new TextDecoder().decode(Uint8Array.from(atob(value), (char) => char.charCodeAt(0)))
-}
-
 function concatTestBytes(chunks: Uint8Array[]): Uint8Array {
   const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0)
   const output = new Uint8Array(total)
@@ -1634,12 +1630,6 @@ function concatTestBytes(chunks: Uint8Array[]): Uint8Array {
     offset += chunk.length
   }
   return output
-}
-
-function sseFrame(event: string, data: unknown, id?: string): Uint8Array {
-  return new TextEncoder().encode(
-    `${id ? `id: ${id}\n` : ""}event: ${event}\ndata: ${JSON.stringify(data)}\n\n`,
-  )
 }
 
 function chatResponseThinking(text: string): Uint8Array {
