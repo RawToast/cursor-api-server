@@ -422,7 +422,8 @@ function registerActiveClientToolCapture(cacheKey, handler) {
 async function captureActiveClientToolCall(cacheKey, toolCall) {
   const handlers = activeClientToolCaptures.get(cacheKey)
   if (!handlers || handlers.size === 0) return false
-  for (const handler of handlers) {
+  // oxlint-disable-next-line no-useless-spread (this is mutated concurrently, snapshot is required)
+  for (const handler of [...handlers]) {
     if (await handler(toolCall)) return true
   }
   return false
