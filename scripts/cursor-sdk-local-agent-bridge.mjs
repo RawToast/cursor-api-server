@@ -29,6 +29,7 @@ const clientToolCallbackPath = "/client-tool-call"
 
 const agentCache = new Map()
 const agentRunQueues = new Map()
+/** @type {Map<string, Set<unknown>>} */
 const activeClientToolCaptures = new Map()
 const forceNextRunAgentKeys = new Set()
 let server = null
@@ -76,6 +77,12 @@ function startServer() {
   return server
 }
 
+/**
+ * Handle a request to the local-agent bridge.
+ * @param {Request} request - The request to handle.
+ * @param {Response} response - The response to write the result to.
+ * @returns {Promise<void>}
+ */
 async function handleRequest(request, response) {
   const url = new URL(request.url || "/", `http://${request.headers.host || `${host}:${port}`}`)
 
@@ -415,6 +422,7 @@ function registerActiveClientToolCapture(cacheKey, handler) {
 async function captureActiveClientToolCall(cacheKey, toolCall) {
   const handlers = activeClientToolCaptures.get(cacheKey)
   if (!handlers || handlers.size === 0) return false
+  // oxlint-disable-next-line no-useless-spread (this is mutated concurrently, snapshot is required)
   for (const handler of [...handlers]) {
     if (await handler(toolCall)) return true
   }
@@ -580,7 +588,7 @@ async function runClientForwardingMcpServer({
       pending.add(task)
     })
     rl.on("close", async () => {
-      await Promise.allSettled([...pending])
+      await Promise.allSettled(pending)
       resolve()
     })
   })
@@ -2442,6 +2450,11 @@ function parseClientTools(value) {
   })
 }
 
+/**
+ * Read a JSON body from a request.
+ * @param {Request} request - The request to read the body from.
+ * @returns {Promise<Record<string, unknown>>} The parsed JSON body.
+ */
 async function readJsonBody(request) {
   let body = ""
   for await (const chunk of request) {

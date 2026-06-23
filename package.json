@@ -29,7 +29,8 @@
     "test:watch": "vitest",
     "compile": "tsc --noEmit",
     "format": "oxfmt",
-    "check": "bun --parallel compile 'oxfmt --check'"
+    "lint": "oxlint --fix",
+    "check": "bun --parallel compile 'oxfmt --check' 'oxlint'"
   },
   "dependencies": {
     "@cursor/sdk": "1.0.18"
@@ -37,6 +38,7 @@
   "devDependencies": {
     "@types/bun": "1.3.14",
     "oxfmt": "0.53.0",
+    "oxlint": "1.70.0",
     "typescript": "7.0.1-rc",
     "vitest": "4.1.8"
   }
