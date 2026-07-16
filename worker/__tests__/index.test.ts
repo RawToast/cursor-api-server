@@ -1279,7 +1279,10 @@ describe("Worker", () => {
       deps,
     )
     expect(withAuth.status).toBe(200)
-    const body = (await withAuth.json()) as { object: string; data: Array<{ id: string }> }
+    const body = (await withAuth.json()) as {
+      object: string
+      data: Array<{ id: string; cost?: { input: number; output: number } }>
+    }
     expect(body).toMatchObject({
       object: "list",
       data: expect.arrayContaining([
@@ -1295,6 +1298,27 @@ describe("Worker", () => {
         expect.objectContaining({ id: "grok-4.5-high" }),
         expect.objectContaining({ id: "grok-4.5-high-fast" }),
       ]),
+    })
+    expect(body.data.find((model) => model.id === "grok-4.5")?.cost).toEqual({ input: 2, output: 6 })
+    expect(body.data.find((model) => model.id === "grok-4.5-fast")?.cost).toEqual({
+      input: 4,
+      output: 18,
+    })
+    expect(body.data.find((model) => model.id === "grok-4.5-low")?.cost).toEqual({
+      input: 2,
+      output: 6,
+    })
+    expect(body.data.find((model) => model.id === "grok-4.5-high")?.cost).toEqual({
+      input: 2,
+      output: 6,
+    })
+    expect(body.data.find((model) => model.id === "grok-4.5-low-fast")?.cost).toEqual({
+      input: 4,
+      output: 18,
+    })
+    expect(body.data.find((model) => model.id === "grok-4.5-high-fast")?.cost).toEqual({
+      input: 4,
+      output: 18,
     })
     expect(body.data.map((model) => model.id)).not.toContain("gpt-5.5")
   })

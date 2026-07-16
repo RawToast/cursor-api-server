@@ -9,6 +9,13 @@ describe("Cursor stream adapter", () => {
     expect(resolveCursorModel("auto")).toEqual({ id: "composer-2.5" })
   })
 
+  it("normalizes Grok 4.5 hyphenated aliases to canonical model ids", () => {
+    expect(resolveCursorModel("grok-4.5-fast")).toEqual({ id: "grok-4.5-fast" })
+    expect(resolveCursorModel("grok-4-5-fast")).toEqual({ id: "grok-4.5-fast" })
+    expect(resolveCursorModel("grok-4-5-high")).toEqual({ id: "grok-4.5-high" })
+    expect(resolveCursorModel("grok-4-5-low-fast")).toEqual({ id: "grok-4.5-low-fast" })
+  })
+
   it("encodes attached images into the user ConversationMessage", () => {
     const body = cursorTestExports.encodeCursorChatRequest({
       prompt: { text: "Describe this image." },

@@ -46,6 +46,20 @@ export async function listCursorModels(
   return cursorPublicJson<CursorModelResponse>(env, deps, apiKey, "/v1/models")
 }
 
+const GROK_45_MODEL_IDS = new Set([
+  "grok-4.5",
+  "grok-4.5-fast",
+  "grok-4.5-low",
+  "grok-4.5-low-fast",
+  "grok-4.5-high",
+  "grok-4.5-high-fast",
+])
+
+function canonicalGrok45ModelId(normalized: string): string | null {
+  const canonical = normalized.replace(/^grok-4-5/, "grok-4.5")
+  return GROK_45_MODEL_IDS.has(canonical) ? canonical : null
+}
+
 export function resolveCursorModel(model: unknown): { id: string } | undefined {
   if (typeof model !== "string" || !model.trim()) return { id: "composer-2.5" }
   const normalized = model.trim().toLowerCase()
@@ -60,6 +74,8 @@ export function resolveCursorModel(model: unknown): { id: string } | undefined {
   if (normalized === "composer-2.5-fast" || normalized === "composer-2-5-fast") {
     return { id: "composer-2.5-fast" }
   }
+  const grok45 = canonicalGrok45ModelId(normalized)
+  if (grok45) return { id: grok45 }
   if (normalized === "auto" || normalized === "default") return { id: "composer-2.5" }
   return { id: model.trim() }
 }

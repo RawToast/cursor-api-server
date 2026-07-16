@@ -2486,7 +2486,9 @@ function costFromTokens(model: string, inputTokens: number, outputTokens: number
 }
 
 function pricingForModel(model: string): CursorModelPricing | null {
-  return CURSOR_MODEL_PRICING[model.trim().toLowerCase()] ?? null
+  const normalized = model.trim().toLowerCase()
+  const canonical = normalized.replace(/^grok-4-5/, "grok-4.5")
+  return CURSOR_MODEL_PRICING[canonical] ?? CURSOR_MODEL_PRICING[normalized] ?? null
 }
 
 function roundUsd(value: number): number {
