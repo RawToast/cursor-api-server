@@ -1288,6 +1288,12 @@ describe("Worker", () => {
         expect.objectContaining({ id: "gpt-5.3-codex" }),
         expect.objectContaining({ id: "gemini-3.1-pro" }),
         expect.objectContaining({ id: "default" }),
+        expect.objectContaining({ id: "grok-4.5" }),
+        expect.objectContaining({ id: "grok-4.5-fast" }),
+        expect.objectContaining({ id: "grok-4.5-low" }),
+        expect.objectContaining({ id: "grok-4.5-low-fast" }),
+        expect.objectContaining({ id: "grok-4.5-high" }),
+        expect.objectContaining({ id: "grok-4.5-high-fast" }),
       ]),
     })
     expect(body.data.map((model) => model.id)).not.toContain("gpt-5.5")
