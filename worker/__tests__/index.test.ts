@@ -1299,7 +1299,10 @@ describe("Worker", () => {
         expect.objectContaining({ id: "grok-4.5-high-fast" }),
       ]),
     })
-    expect(body.data.find((model) => model.id === "grok-4.5")?.cost).toEqual({ input: 2, output: 6 })
+    expect(body.data.find((model) => model.id === "grok-4.5")?.cost).toEqual({
+      input: 2,
+      output: 6,
+    })
     expect(body.data.find((model) => model.id === "grok-4.5-fast")?.cost).toEqual({
       input: 4,
       output: 18,
