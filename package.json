@@ -33,13 +33,13 @@
     "check": "bun --parallel compile 'oxfmt --check' 'oxlint'"
   },
   "dependencies": {
-    "@cursor/sdk": "1.0.18"
+    "@cursor/sdk": "1.0.23"
   },
   "devDependencies": {
     "@types/bun": "1.3.14",
-    "oxfmt": "0.53.0",
-    "oxlint": "1.70.0",
-    "typescript": "7.0.1-rc",
-    "vitest": "4.1.8"
+    "oxfmt": "0.58.0",
+    "oxlint": "1.73.0",
+    "typescript": "7.0.2",
+    "vitest": "4.1.10"
   }
 }
