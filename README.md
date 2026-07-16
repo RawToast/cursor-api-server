@@ -2,6 +2,8 @@
 
 A local OpenAI-compatible `/v1` server backed by Cursor Composer. One Bun process, no cloud, no app — your Cursor API key goes straight through as the Bearer token and nothing is stored.
 
+Initially a fork of: [Composer AI](https://github.com/standardagents/composer-api)
+
 ## Quickstart
 
 ```bash
@@ -57,6 +59,87 @@ All settings are optional environment variables (Bun auto-loads `.env`; see `.en
 | `CURSOR_SDK_BRIDGE_URL`                               | unset                    | Use an external bridge instead of starting one (pair with `CURSOR_SDK_BRIDGE_TOKEN`) |
 | `CURSOR_SDK_BRIDGE_TIMEOUT_MS`                        | `180000`                 | Bridge request timeout                                                               |
 | `CURSOR_CLIENT_VERSION` / `CURSOR_SDK_CLIENT_VERSION` | `2.6.22` / `sdk-1.0.13`  | Version strings sent to Cursor                                                       |
+
+### Example Opencode config
+
+```json
+"cursorapi": {
+  "models": {
+    "composer-2.5": {
+      "cost": {
+        "input": 0.5,
+        "output": 2.5
+      },
+      "limit": {
+        "context": 200000,
+        "output": 65536
+      },
+      "name": "Composer 2.5"
+    },
+    "composer-2.5-fast": {
+      "cost": {
+        "input": 3,
+        "output": 15
+      },
+      "limit": {
+        "context": 200000,
+        "output": 65536
+      },
+      "name": "Composer 2.5 Fast"
+    },
+    "grok-4.5": {
+      "cost": {
+        "input": 2,
+        "output": 6
+      },
+      "limit": {
+        "context": 256000,
+        "output": 65536
+      },
+      "variants": {
+        "medium": {
+          "thinking": "medium"
+        },
+        "low": {
+          "thinking": "low"
+        },
+        "high": {
+          "thinking": "high"
+        }
+      },
+      "name": "Grok 4.5"
+    },
+    "grok-4.5-fast": {
+      "cost": {
+        "input": 4,
+        "output": 18
+      },
+      "limit": {
+        "context": 256000,
+        "output": 65536
+      },
+      "variants": {
+        "medium": {
+          "thinking": "medium"
+        },
+        "low": {
+          "thinking": "low"
+        },
+        "high": {
+          "thinking": "high"
+        }
+      },
+      "name": "Grok 4.5 Fast"
+    }
+  },
+  "name": "API for Cursor",
+  "npm": "@ai-sdk/openai-compatible",
+  "options": {
+    "apiKey": "crsr_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "baseURL": "http://127.0.0.1:8787/v1"
+  }
+}
+```
 
 ### Legacy direct-backend fallback
 
