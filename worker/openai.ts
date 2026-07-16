@@ -61,6 +61,7 @@ const sdkToolCallMemory = new Map<string, SdkToolCallMemory>()
 const SDK_TOOL_CALL_MEMORY_LIMIT = 2048
 
 const CURSOR_COMPOSER_2_5_PRICING_SOURCE = "https://cursor.com/changelog/composer-2-5"
+const CURSOR_GROK_4_5_PRICING_SOURCE = "https://cursor.com/en-US/docs/models/grok-4-5"
 const CURSOR_MODEL_PRICING: Record<string, CursorModelPricing> = {
   default: { input: 0.5, output: 2.5, source: CURSOR_COMPOSER_2_5_PRICING_SOURCE },
   auto: { input: 0.5, output: 2.5, source: CURSOR_COMPOSER_2_5_PRICING_SOURCE },
@@ -70,6 +71,12 @@ const CURSOR_MODEL_PRICING: Record<string, CursorModelPricing> = {
   "composer-2-5": { input: 0.5, output: 2.5, source: CURSOR_COMPOSER_2_5_PRICING_SOURCE },
   "composer-2.5-fast": { input: 3, output: 15, source: CURSOR_COMPOSER_2_5_PRICING_SOURCE },
   "composer-2-5-fast": { input: 3, output: 15, source: CURSOR_COMPOSER_2_5_PRICING_SOURCE },
+  "grok-4.5": { input: 2, output: 6, source: CURSOR_GROK_4_5_PRICING_SOURCE },
+  "grok-4.5-low": { input: 2, output: 6, source: CURSOR_GROK_4_5_PRICING_SOURCE },
+  "grok-4.5-high": { input: 2, output: 6, source: CURSOR_GROK_4_5_PRICING_SOURCE },
+  "grok-4.5-fast": { input: 4, output: 18, source: CURSOR_GROK_4_5_PRICING_SOURCE },
+  "grok-4.5-low-fast": { input: 4, output: 18, source: CURSOR_GROK_4_5_PRICING_SOURCE },
+  "grok-4.5-high-fast": { input: 4, output: 18, source: CURSOR_GROK_4_5_PRICING_SOURCE },
 }
 
 const SYSTEM_DIRECTIVE = [
@@ -759,6 +766,12 @@ export function modelList(
       modelItem("gemini-2.5-flash", "Gemini 2.5 Flash"),
       modelItem("grok-build-0.1", "Grok Build 0.1"),
       modelItem("grok-4.3", "Grok 4.3"),
+      modelItem("grok-4.5", "Grok 4.5"),
+      modelItem("grok-4.5-fast", "Grok 4.5 Fast"),
+      modelItem("grok-4.5-low", "Grok 4.5 Low"),
+      modelItem("grok-4.5-low-fast", "Grok 4.5 Low Fast"),
+      modelItem("grok-4.5-high", "Grok 4.5 High"),
+      modelItem("grok-4.5-high-fast", "Grok 4.5 High Fast"),
       modelItem("kimi-k2.5", "Kimi K2.5"),
     ],
   }
@@ -2473,7 +2486,9 @@ function costFromTokens(model: string, inputTokens: number, outputTokens: number
 }
 
 function pricingForModel(model: string): CursorModelPricing | null {
-  return CURSOR_MODEL_PRICING[model.trim().toLowerCase()] ?? null
+  const normalized = model.trim().toLowerCase()
+  const canonical = normalized.replace(/^grok-4-5/, "grok-4.5")
+  return CURSOR_MODEL_PRICING[canonical] ?? CURSOR_MODEL_PRICING[normalized] ?? null
 }
 
 function roundUsd(value: number): number {

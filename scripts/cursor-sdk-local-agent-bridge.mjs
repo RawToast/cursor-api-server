@@ -2389,6 +2389,28 @@ function evictAgents() {
   }
 }
 
+const GROK_45_VARIANTS = new Map([
+  ["grok-4.5", { fast: "false" }],
+  ["grok-4.5-fast", { fast: "true" }],
+  ["grok-4.5-low", { fast: "false", effort: "low" }],
+  ["grok-4.5-low-fast", { fast: "true", effort: "low" }],
+  ["grok-4.5-high", { fast: "false", effort: "high" }],
+  ["grok-4.5-high-fast", { fast: "true", effort: "high" }],
+])
+
+function normalizeGrok45Model(normalized) {
+  const canonical = normalized.replace(/^grok-4-5/, "grok-4.5")
+  return GROK_45_VARIANTS.has(canonical) ? canonical : null
+}
+
+function grok45SdkModelSelection(normalized) {
+  const variant = GROK_45_VARIANTS.get(normalized)
+  if (!variant) return null
+  const params = [{ id: "fast", value: variant.fast }]
+  if (variant.effort) params.push({ id: "effort", value: variant.effort })
+  return { id: "grok-4.5", params }
+}
+
 function normalizeModel(model) {
   const raw = model.trim()
   const normalized = raw.toLowerCase().split("/").filter(Boolean).at(-1) || ""
@@ -2404,6 +2426,8 @@ function normalizeModel(model) {
   if (normalized === "composer-2.5-sdk" || normalized === "composer-2-5-sdk") return "composer-2.5"
   if (normalized === "composer-2.5-fast" || normalized === "composer-2-5-fast")
     return "composer-2.5-fast"
+  const grok45 = normalizeGrok45Model(normalized)
+  if (grok45) return grok45
   return raw
 }
 
@@ -2413,6 +2437,8 @@ function sdkModelSelection(model) {
     return { id: "composer-2.5", params: [{ id: "fast", value: "false" }] }
   if (normalized === "composer-2.5-fast")
     return { id: "composer-2.5", params: [{ id: "fast", value: "true" }] }
+  const grok45 = grok45SdkModelSelection(normalized)
+  if (grok45) return grok45
   return { id: normalized }
 }
 
