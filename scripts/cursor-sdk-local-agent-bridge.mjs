@@ -264,6 +264,11 @@ async function runLocalAgentUnlocked(input, onEvent) {
       const shouldRetry = attempt < maxRunRetries && !emittedEvent && isRetryableSDKRunError(error)
       if (!shouldRetry) {
         noteSdkRunFailure(error)
+        if (!timedOut) {
+          evictCachedAgent(input, {
+            resume: isOpaqueSDKRunFailure(error) || isStaleSdkAuthFailure(error),
+          })
+        }
         throw error
       }
       if (activeRun) activeRun.cancel().catch(() => {})
@@ -2720,7 +2725,7 @@ function noteSdkRunFailure(error) {
     )
     return
   }
-  if (isAuthenticationSDKError(error)) consecutiveOpaqueFailures = 0
+  consecutiveOpaqueFailures = 0
 }
 
 function scheduleBridgeRestart(reason) {

@@ -39,8 +39,7 @@ describe("Cursor SDK local-agent bridge", () => {
   })
 
   it("treats stale SDK auth token failures as retryable process recovery, not bad API keys", () => {
-    const staleMessage =
-      "Authentication error If you are logged in, try logging out and back in."
+    const staleMessage = "Authentication error If you are logged in, try logging out and back in."
     expect(isStaleSdkAuthFailure(new Error(staleMessage))).toBe(true)
     expect(isStaleSdkAuthFailure({ code: "ERROR_NOT_LOGGED_IN" })).toBe(true)
     expect(isRetryableSDKRunError(new Error(staleMessage))).toBe(true)
@@ -55,9 +54,9 @@ describe("Cursor SDK local-agent bridge", () => {
       retryable: true,
     })
     expect(statusFromError(new Error(staleMessage))).toBe(503)
-    expect(statusFromError(Object.assign(new Error(staleMessage), { name: "AuthenticationError" }))).toBe(
-      503,
-    )
+    expect(
+      statusFromError(Object.assign(new Error(staleMessage), { name: "AuthenticationError" })),
+    ).toBe(503)
     expect(isRetryableSDKRunError(new Error("Missing or invalid authorization"))).toBe(false)
   })
 
