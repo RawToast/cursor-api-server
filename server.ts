@@ -63,17 +63,29 @@ async function startBridge(): Promise<BridgeSetup> {
 type SpawnedProcess = ReturnType<typeof Bun.spawn>
 function spawnBridgeSubprocess(runtime: string): () => void {
   let stopped = false
-  let child = Bun.spawn([runtime, bridgeScript], { stdout: "inherit", stderr: "inherit" })
+  const bridgeHost = process.env.CURSOR_SDK_BRIDGE_HOST || "127.0.0.1"
+  const bridgePort = process.env.CURSOR_SDK_BRIDGE_PORT || "8792"
+  const healthUrl = `http://${bridgeHost}:${bridgePort}/health`
+  const spawnChild = (): SpawnedProcess =>
+    Bun.spawn([runtime, bridgeScript], { stdout: "inherit", stderr: "inherit" })
 
-  const superviseExit = (proc: SpawnedProcess) => {
-    void proc.exited.then((code) => {
+  let child = spawnChild()
+
+  function superviseExit(proc: SpawnedProcess): void {
+    void proc.exited.then(async (code) => {
       if (stopped) return
       console.error(`SDK bridge exited with code ${code}; restarting in 1s.`)
-      setTimeout(() => {
-        if (stopped) return
-        child = Bun.spawn([runtime, bridgeScript], { stdout: "inherit", stderr: "inherit" })
-        superviseExit(child)
-      }, 1000)
+      await new Promise((resolve) => setTimeout(resolve, 1000))
+      if (stopped) return
+      child = spawnChild()
+      superviseExit(child)
+      try {
+        await waitForBridgeHealth(healthUrl)
+        console.error("SDK bridge restarted and is healthy.")
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        console.error(`SDK bridge failed to become healthy after restart: ${message}`)
+      }
     })
   }
   superviseExit(child)

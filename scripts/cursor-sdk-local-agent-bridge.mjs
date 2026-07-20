@@ -32,6 +32,15 @@ const agentRunQueues = new Map()
 /** @type {Map<string, Set<unknown>>} */
 const activeClientToolCaptures = new Map()
 const forceNextRunAgentKeys = new Set()
+/** @type {Map<string, string>} */
+const pendingResumeAgentIds = new Map()
+const opaqueFailureRestartThreshold = parseInteger(
+  process.env.CURSOR_SDK_BRIDGE_OPAQUE_FAILURE_RESTART,
+  1,
+)
+const timeoutSettleMs = parseInteger(process.env.CURSOR_SDK_BRIDGE_TIMEOUT_SETTLE_MS, 2_000)
+let consecutiveOpaqueFailures = 0
+let bridgeRestartScheduled = false
 let server = null
 
 if (isMainModule()) {
@@ -52,7 +61,9 @@ export {
   localAgentCreateOptions,
   localAgentSendOptions,
   isForwardableSDKToolCall,
+  isOpaqueSDKRunFailure,
   isRetryableSDKRunError,
+  isStaleSdkAuthFailure,
   normalizeSDKToolCall,
   normalizeModel,
   openAiError,
@@ -211,6 +222,7 @@ async function runLocalAgentUnlocked(input, onEvent) {
     let activeRun = null
     let emittedEvent = false
     let timer = null
+    let timedOut = false
     const emit = onEvent
       ? (event) => {
           emittedEvent = true
@@ -226,6 +238,7 @@ async function runLocalAgentUnlocked(input, onEvent) {
     )
     const timeout = new Promise((_resolve, reject) => {
       timer = setTimeout(() => {
+        timedOut = true
         const error = new HttpError("Cursor SDK bridge run timed out.", 504, "cursor_sdk_timeout")
         reject(error)
         if (activeRun) {
@@ -235,13 +248,35 @@ async function runLocalAgentUnlocked(input, onEvent) {
     })
 
     try {
-      return await Promise.race([work, timeout])
+      const output = await Promise.race([work, timeout])
+      noteSdkRunSuccess()
+      return output
     } catch (error) {
-      work.catch(() => {})
+      if (timedOut) {
+        // Keep the per-agent exclusive lock until the abandoned run settles, or
+        // the next send() on the same cached agent races a still-live run.
+        if (activeRun) activeRun.cancel().catch(() => {})
+        evictCachedAgent(input, { resume: true })
+        await Promise.race([work.catch(() => {}), sleep(timeoutSettleMs)])
+      } else {
+        work.catch(() => {})
+      }
       const shouldRetry = attempt < maxRunRetries && !emittedEvent && isRetryableSDKRunError(error)
-      if (!shouldRetry) throw error
+      if (!shouldRetry) {
+        noteSdkRunFailure(error)
+        if (!timedOut) {
+          evictCachedAgent(input, {
+            resume: isOpaqueSDKRunFailure(error) || isStaleSdkAuthFailure(error),
+          })
+        }
+        throw error
+      }
       if (activeRun) activeRun.cancel().catch(() => {})
-      evictCachedAgent(input)
+      // Opaque errors and stale exchanged-token auth both recover via resume/restart,
+      // not by treating the caller's API key as invalid.
+      evictCachedAgent(input, {
+        resume: isOpaqueSDKRunFailure(error) || isStaleSdkAuthFailure(error),
+      })
       console.warn(
         `Retrying Cursor SDK run after retryable upstream error (${attempt + 1}/${maxRunRetries}).`,
       )
@@ -384,10 +419,28 @@ async function getAgent(input) {
     return { agent: cached.agent, cacheKey, cached: true }
   }
 
-  const agent = await Agent.create(localAgentCreateOptions(input))
+  const agent = await createOrResumeAgent(input, cacheKey)
   agentCache.set(cacheKey, { agent, touchedAt: Date.now() })
   evictAgents()
   return { agent, cacheKey, cached: false }
+}
+
+async function createOrResumeAgent(input, cacheKey) {
+  const options = localAgentCreateOptions(input)
+  const resumeId = pendingResumeAgentIds.get(cacheKey)
+  if (resumeId) {
+    pendingResumeAgentIds.delete(cacheKey)
+    try {
+      // Cursor's recommended recovery for bare local-agent status=error:
+      // close the handle, then Agent.resume(agentId) instead of create().
+      return await Agent.resume(resumeId, options)
+    } catch (error) {
+      console.warn(
+        `Cursor SDK Agent.resume failed after opaque error; falling back to Agent.create (${error?.message || error}).`,
+      )
+    }
+  }
+  return Agent.create(options)
 }
 
 function evictAgent(cacheKey, agent) {
@@ -401,10 +454,17 @@ function evictAgent(cacheKey, agent) {
   } catch {}
 }
 
-function evictCachedAgent(input) {
+function evictCachedAgent(input, options = {}) {
   const cacheKey = agentCacheKey(input)
   const cached = agentCache.get(cacheKey)
-  if (cached) evictAgent(cacheKey, cached.agent)
+  if (!cached) return
+  const agentId = cached.agent?.agentId
+  if (options.resume === true && typeof agentId === "string" && agentId) {
+    pendingResumeAgentIds.set(cacheKey, agentId)
+  } else {
+    pendingResumeAgentIds.delete(cacheKey)
+  }
+  evictAgent(cacheKey, cached.agent)
 }
 
 function registerActiveClientToolCapture(cacheKey, handler) {
@@ -2550,6 +2610,9 @@ function isBenignPipeError(error) {
 }
 
 function isRetryableSDKRunError(error) {
+  // SDK marks stale local-agent token/connection failures as non-retryable auth,
+  // but resume/restart recovers them with the same API key.
+  if (isStaleSdkAuthFailure(error)) return true
   const values = flattenErrorValues(error)
   if (values.some((value) => value?.isRetryable === true)) return true
   if (
@@ -2582,6 +2645,18 @@ function isRetryableSDKRunError(error) {
     )
 }
 
+function isStaleSdkAuthFailure(error) {
+  return flattenErrorValues(error).some((value) => {
+    const message = String(value?.message || value?.rawMessage || value?.error || "").toLowerCase()
+    const code = String(value?.code || "").toLowerCase()
+    return (
+      code === "error_not_logged_in" ||
+      message.includes("error_not_logged_in") ||
+      message.includes("try logging out and back in")
+    )
+  })
+}
+
 function sdkRunFailureError(result) {
   const summary = sdkRunFailureSummary(result)
   const error = new HttpError(
@@ -2592,7 +2667,15 @@ function sdkRunFailureError(result) {
   error.rawMessage = summary.message
   error.isRetryable = summary.retryable
   error.cause = summary
-  console.warn(`Cursor SDK run returned error status${summary.code ? ` (${summary.code})` : ""}.`)
+  const detailParts = []
+  if (summary.code) detailParts.push(`code=${summary.code}`)
+  if (summary.message) detailParts.push(`message=${summary.message}`)
+  detailParts.push(summary.retryable ? "retryable" : "non-retryable")
+  if (result?.id) detailParts.push(`run=${result.id}`)
+  const detail = detailParts.join(", ")
+  console.warn(
+    `Cursor SDK run returned error status${detail ? ` (${detail})` : " (opaque, no code/message)"}.`,
+  )
   return error
 }
 
@@ -2612,6 +2695,46 @@ function sdkRunFailureSummary(result) {
     message,
     retryable: isRetryableSDKRunError(source) || (!message && !code),
   }
+}
+
+function isOpaqueSDKRunFailure(error) {
+  if (!error || error.isRetryable !== true || isAuthenticationSDKError(error)) return false
+  const summary = isRecord(error.cause) ? error.cause : null
+  if (summary?.status === "error" && !summary.message && !summary.code) return true
+
+  const message = firstNonEmptyString(error.rawMessage, error.message)
+  if (message && message !== "Cursor SDK run failed") return false
+  if (error.code && error.code !== "cursor_sdk_error") return false
+  // Generic cursor_sdk_error with no upstream code is treated as opaque.
+  return !firstNonEmptyString(summary?.code)
+}
+
+function noteSdkRunSuccess() {
+  consecutiveOpaqueFailures = 0
+}
+
+function noteSdkRunFailure(error) {
+  if (isOpaqueSDKRunFailure(error) || isStaleSdkAuthFailure(error)) {
+    consecutiveOpaqueFailures += 1
+    if (consecutiveOpaqueFailures < opaqueFailureRestartThreshold) return
+    const kind = isStaleSdkAuthFailure(error)
+      ? "stale SDK auth token/connection"
+      : "opaque Cursor SDK error status"
+    scheduleBridgeRestart(
+      `${kind} x${consecutiveOpaqueFailures} (process restart recovers; API key is usually still valid)`,
+    )
+    return
+  }
+  consecutiveOpaqueFailures = 0
+}
+
+function scheduleBridgeRestart(reason) {
+  if (bridgeRestartScheduled || !isMainModule()) return
+  bridgeRestartScheduled = true
+  console.error(`Restarting Cursor SDK bridge: ${reason}`)
+  setTimeout(() => {
+    void closeAndExit(1)
+  }, 50).unref?.()
 }
 
 function firstRecord(...values) {
@@ -2694,6 +2817,8 @@ function codeFromError(error, status) {
 }
 
 function isAuthenticationSDKError(error) {
+  // Stale exchanged-token failures look like auth but the API key is still valid.
+  if (isStaleSdkAuthFailure(error)) return false
   return flattenErrorValues(error).some((value) => {
     const name = String(value?.name || "").toLowerCase()
     const code = String(value?.code || "").toLowerCase()
