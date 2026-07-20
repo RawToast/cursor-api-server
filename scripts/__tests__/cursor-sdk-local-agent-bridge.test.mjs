@@ -13,6 +13,7 @@ import {
   isForwardableSDKToolCall,
   isOpaqueSDKRunFailure,
   isRetryableSDKRunError,
+  isStaleSdkAuthFailure,
   normalizeModel,
   normalizeSDKToolCall,
   openAiError,
@@ -35,6 +36,29 @@ describe("Cursor SDK local-agent bridge", () => {
     expect(isRetryableSDKRunError({ status: 429 })).toBe(true)
     expect(isRetryableSDKRunError(new Error("Missing or invalid authorization"))).toBe(false)
     expect(isRetryableSDKRunError({ status: 401, message: "Unauthorized" })).toBe(false)
+  })
+
+  it("treats stale SDK auth token failures as retryable process recovery, not bad API keys", () => {
+    const staleMessage =
+      "Authentication error If you are logged in, try logging out and back in."
+    expect(isStaleSdkAuthFailure(new Error(staleMessage))).toBe(true)
+    expect(isStaleSdkAuthFailure({ code: "ERROR_NOT_LOGGED_IN" })).toBe(true)
+    expect(isRetryableSDKRunError(new Error(staleMessage))).toBe(true)
+    expect(isRetryableSDKRunError({ code: "ERROR_NOT_LOGGED_IN", isRetryable: false })).toBe(true)
+    expect(
+      sdkRunFailureSummary({
+        status: "error",
+        error: { message: staleMessage, code: "ERROR_NOT_LOGGED_IN" },
+      }),
+    ).toMatchObject({
+      message: staleMessage,
+      retryable: true,
+    })
+    expect(statusFromError(new Error(staleMessage))).toBe(503)
+    expect(statusFromError(Object.assign(new Error(staleMessage), { name: "AuthenticationError" }))).toBe(
+      503,
+    )
+    expect(isRetryableSDKRunError(new Error("Missing or invalid authorization"))).toBe(false)
   })
 
   it("treats opaque SDK error results as retryable but preserves explicit auth failures", () => {

@@ -63,6 +63,7 @@ export {
   isForwardableSDKToolCall,
   isOpaqueSDKRunFailure,
   isRetryableSDKRunError,
+  isStaleSdkAuthFailure,
   normalizeSDKToolCall,
   normalizeModel,
   openAiError,
@@ -266,7 +267,11 @@ async function runLocalAgentUnlocked(input, onEvent) {
         throw error
       }
       if (activeRun) activeRun.cancel().catch(() => {})
-      evictCachedAgent(input, { resume: isOpaqueSDKRunFailure(error) })
+      // Opaque errors and stale exchanged-token auth both recover via resume/restart,
+      // not by treating the caller's API key as invalid.
+      evictCachedAgent(input, {
+        resume: isOpaqueSDKRunFailure(error) || isStaleSdkAuthFailure(error),
+      })
       console.warn(
         `Retrying Cursor SDK run after retryable upstream error (${attempt + 1}/${maxRunRetries}).`,
       )
@@ -2600,6 +2605,9 @@ function isBenignPipeError(error) {
 }
 
 function isRetryableSDKRunError(error) {
+  // SDK marks stale local-agent token/connection failures as non-retryable auth,
+  // but resume/restart recovers them with the same API key.
+  if (isStaleSdkAuthFailure(error)) return true
   const values = flattenErrorValues(error)
   if (values.some((value) => value?.isRetryable === true)) return true
   if (
@@ -2630,6 +2638,18 @@ function isRetryableSDKRunError(error) {
         text === "unavailable" ||
         text === "resource_exhausted",
     )
+}
+
+function isStaleSdkAuthFailure(error) {
+  return flattenErrorValues(error).some((value) => {
+    const message = String(value?.message || value?.rawMessage || value?.error || "").toLowerCase()
+    const code = String(value?.code || "").toLowerCase()
+    return (
+      code === "error_not_logged_in" ||
+      message.includes("error_not_logged_in") ||
+      message.includes("try logging out and back in")
+    )
+  })
 }
 
 function sdkRunFailureError(result) {
@@ -2689,11 +2709,14 @@ function noteSdkRunSuccess() {
 }
 
 function noteSdkRunFailure(error) {
-  if (isOpaqueSDKRunFailure(error)) {
+  if (isOpaqueSDKRunFailure(error) || isStaleSdkAuthFailure(error)) {
     consecutiveOpaqueFailures += 1
     if (consecutiveOpaqueFailures < opaqueFailureRestartThreshold) return
+    const kind = isStaleSdkAuthFailure(error)
+      ? "stale SDK auth token/connection"
+      : "opaque Cursor SDK error status"
     scheduleBridgeRestart(
-      `opaque Cursor SDK error status x${consecutiveOpaqueFailures} (known local-agent stuck state; process restart recovers)`,
+      `${kind} x${consecutiveOpaqueFailures} (process restart recovers; API key is usually still valid)`,
     )
     return
   }
@@ -2789,6 +2812,8 @@ function codeFromError(error, status) {
 }
 
 function isAuthenticationSDKError(error) {
+  // Stale exchanged-token failures look like auth but the API key is still valid.
+  if (isStaleSdkAuthFailure(error)) return false
   return flattenErrorValues(error).some((value) => {
     const name = String(value?.name || "").toLowerCase()
     const code = String(value?.code || "").toLowerCase()
