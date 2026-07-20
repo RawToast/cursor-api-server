@@ -11,6 +11,7 @@ import {
   localAgentCreateOptions,
   localAgentSendOptions,
   isForwardableSDKToolCall,
+  isOpaqueSDKRunFailure,
   isRetryableSDKRunError,
   normalizeModel,
   normalizeSDKToolCall,
@@ -61,6 +62,36 @@ describe("Cursor SDK local-agent bridge", () => {
       code: "unauthorized",
       retryable: false,
     })
+  })
+
+  it("detects opaque SDK run failures that need agent resume or bridge restart", () => {
+    const opaque = Object.assign(new Error("Cursor SDK run failed"), {
+      code: "cursor_sdk_error",
+      isRetryable: true,
+      rawMessage: "",
+      cause: { status: "error", code: "", message: "", retryable: true },
+    })
+    expect(isOpaqueSDKRunFailure(opaque)).toBe(true)
+
+    const capacity = Object.assign(new Error("Server at capacity"), {
+      code: "cursor_sdk_error",
+      isRetryable: true,
+      rawMessage: "Server at capacity",
+      cause: {
+        status: "error",
+        code: "unavailable",
+        message: "Server at capacity",
+        retryable: true,
+      },
+    })
+    expect(isOpaqueSDKRunFailure(capacity)).toBe(false)
+
+    const auth = Object.assign(new Error("Missing or invalid authorization"), {
+      code: "unauthorized",
+      isRetryable: false,
+      status: 401,
+    })
+    expect(isOpaqueSDKRunFailure(auth)).toBe(false)
   })
 
   it("surfaces Cursor SDK authentication failures as unauthorized API errors", () => {
