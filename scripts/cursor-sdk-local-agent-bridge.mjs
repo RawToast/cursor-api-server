@@ -2633,15 +2633,17 @@ function isRetryableSDKRunError(error) {
     .filter((value) => value !== undefined && value !== null)
     .map((value) => String(value).toLowerCase())
     .some(
-      (text) =>
-        text.includes("server at capacity") ||
+      (text) => {
+        console.log("Error text:", text)
+        return text.includes("server at capacity") ||
         text.includes("temporarily unavailable") ||
         text.includes("resource exhausted") ||
         text.includes("rate limit") ||
         text.includes("too many requests") ||
         text.includes("try again") ||
         text === "unavailable" ||
-        text === "resource_exhausted",
+        text === "resource_exhausted"
+      }
     )
 }
 
